@@ -1,0 +1,8 @@
+# Tell libduckdb-sys to download a prebuilt DuckDB instead of compiling from
+# source. This dramatically cuts build time on Windows (where the cc-based
+# `bundled` feature is very slow). The archive is cached at
+# target/duckdb-download/<target>/<version> and linked dynamically; the build
+# script automatically adds that directory to the linker search path and
+# emits the runtime DLL alongside it.
+[env]
+DUCKDB_DOWNLOAD_LIB = "1"
