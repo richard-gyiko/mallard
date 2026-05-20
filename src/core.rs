@@ -20,14 +20,16 @@ impl SymbolId {
         hasher.update(kind.as_str().as_bytes());
         hasher.update(&[0]);
         hasher.update(signature.as_bytes());
-        let hash = hasher.finalize();
-        let hex = hash.to_hex();
-        SymbolId(hex.as_str()[..32].to_string())
+        SymbolId(short_hash(hasher.finalize()))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+pub fn short_hash(hash: blake3::Hash) -> String {
+    hash.to_hex().as_str()[..32].to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -23,6 +23,8 @@ pub struct WalkEntry {
 
 const BINARY_PROBE_BYTES: usize = 8 * 1024;
 
+const SKIP_DIRS: &[&str] = &[".git", ".hg", ".svn", "target", "node_modules"];
+
 pub fn walk(root: &Path, opts: &WalkOptions) -> Vec<WalkEntry> {
     let mut entries: Vec<WalkEntry> = Vec::new();
     let walker = WalkDir::new(root)
@@ -33,8 +35,10 @@ pub fn walk(root: &Path, opts: &WalkOptions) -> Vec<WalkEntry> {
         if e.depth() == 0 {
             return true;
         }
-        let name = e.file_name().to_string_lossy();
-        name != ".git"
+        if !e.file_type().is_dir() {
+            return true;
+        }
+        !SKIP_DIRS.iter().any(|s| e.file_name() == *s)
     }) {
         let Ok(entry) = entry else { continue };
         let path = entry.path();

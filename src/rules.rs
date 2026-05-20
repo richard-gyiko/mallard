@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::core::{FileId, Finding, Result};
+use crate::core::{FileId, Finding, Result, short_hash};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleDef {
@@ -34,18 +34,13 @@ impl RuleSet {
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         let file: RuleFile = serde_yaml::from_slice(&bytes)?;
-        let hash = blake3::hash(&bytes).to_hex().as_str()[..32].to_string();
         Ok(RuleSet {
             rules: file.rules,
-            source_hash: Some(hash),
+            source_hash: Some(short_hash(blake3::hash(&bytes))),
         })
     }
 
     pub fn run(&self, _file_id: FileId, _source: &[u8], _language: &str) -> Vec<Finding> {
-        // v0: rule execution deferred. The findings table exists and is queryable;
-        // a future version will run patterns via ast-grep-core. Rule set metadata
-        // (id, hash) is still tracked so re-builds with the same rules stay
-        // deterministic.
         Vec::new()
     }
 }

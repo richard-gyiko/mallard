@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 use duckdb::{Connection, params};
 
 use crate::core::{
-    Anchor, Edge, EdgeKind, FileId, FileRecord, FileStatus, Finding, Metadata, MallardError,
-    ParseError, Result, Symbol, SymbolKind,
+    Anchor, Edge, FileId, FileRecord, Finding, Metadata, MallardError, ParseError, Result, Symbol,
 };
 
 const SCHEMA_DDL: &str = r#"
@@ -75,8 +74,10 @@ impl IndexWriter {
             }
         }
         let tmp_path = tmp_path_for(final_path);
-        if tmp_path.exists() {
-            std::fs::remove_file(&tmp_path)?;
+        match std::fs::remove_file(&tmp_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
         let conn = Connection::open(&tmp_path)?;
         conn.execute_batch(SCHEMA_DDL)?;
@@ -101,68 +102,98 @@ impl IndexWriter {
         Ok(())
     }
 
-    pub fn append_symbol(&mut self, file_id: FileId, sym: &Symbol) -> Result<()> {
+    pub fn append_symbols(&mut self, file_id: FileId, syms: &[Symbol]) -> Result<()> {
+        if syms.is_empty() {
+            return Ok(());
+        }
         let mut app = self.conn.appender("symbols")?;
-        let a: Anchor = sym.anchor;
-        app.append_row(params![
-            sym.id.as_str(),
-            file_id,
-            sym.qualified_name.as_str(),
-            sym.kind.as_str(),
-            sym.signature.as_str(),
-            a.start_byte as i64,
-            a.end_byte as i64,
-            a.start_line as i32,
-            a.end_line as i32,
-        ])?;
+        for sym in syms {
+            let a: Anchor = sym.anchor;
+            app.append_row(params![
+                sym.id.as_str(),
+                file_id,
+                sym.qualified_name.as_str(),
+                sym.kind.as_str(),
+                sym.signature.as_str(),
+                a.start_byte as i64,
+                a.end_byte as i64,
+                a.start_line as i32,
+                a.end_line as i32,
+            ])?;
+        }
         app.flush()?;
         Ok(())
     }
 
-    pub fn append_edge(&mut self, edge: &Edge) -> Result<()> {
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO edges (src_symbol_id, dst_symbol_id, dst_unresolved, kind, file_id) VALUES (?, ?, ?, ?, ?)",
-        )?;
-        stmt.execute(params![
-            edge.src.as_str(),
-            edge.dst.as_ref().map(|d| d.as_str()),
-            edge.dst_unresolved.as_deref(),
-            edge.kind.as_str(),
-            edge.file_id,
-        ])?;
+    pub fn append_edges(&mut self, edges: &[Edge]) -> Result<()> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let mut app = self
+            .conn
+            .appender_with_columns(
+                "edges",
+                &["src_symbol_id", "dst_symbol_id", "dst_unresolved", "kind", "file_id"],
+            )?;
+        for edge in edges {
+            app.append_row(params![
+                edge.src.as_str(),
+                edge.dst.as_ref().map(|d| d.as_str()),
+                edge.dst_unresolved.as_deref(),
+                edge.kind.as_str(),
+                edge.file_id,
+            ])?;
+        }
+        app.flush()?;
         Ok(())
     }
 
-    pub fn append_finding(&mut self, finding: &Finding) -> Result<()> {
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO findings (rule_id, file_id, start_line, end_line, message) VALUES (?, ?, ?, ?, ?)",
-        )?;
-        stmt.execute(params![
-            finding.rule_id.as_str(),
-            finding.file_id,
-            finding.start_line as i32,
-            finding.end_line as i32,
-            finding.message.as_str(),
-        ])?;
+    pub fn append_findings(&mut self, findings: &[Finding]) -> Result<()> {
+        if findings.is_empty() {
+            return Ok(());
+        }
+        let mut app = self
+            .conn
+            .appender_with_columns(
+                "findings",
+                &["rule_id", "file_id", "start_line", "end_line", "message"],
+            )?;
+        for f in findings {
+            app.append_row(params![
+                f.rule_id.as_str(),
+                f.file_id,
+                f.start_line as i32,
+                f.end_line as i32,
+                f.message.as_str(),
+            ])?;
+        }
+        app.flush()?;
         Ok(())
     }
 
-    pub fn append_parse_error(&mut self, err: &ParseError) -> Result<()> {
+    pub fn append_parse_errors(&mut self, errs: &[ParseError]) -> Result<()> {
+        if errs.is_empty() {
+            return Ok(());
+        }
         let mut app = self.conn.appender("parse_errors")?;
-        app.append_row(params![
-            err.file_id,
-            err.message.as_str(),
-            err.line as i32,
-            err.col as i32,
-        ])?;
+        for err in errs {
+            app.append_row(params![
+                err.file_id,
+                err.message.as_str(),
+                err.line as i32,
+                err.col as i32,
+            ])?;
+        }
         app.flush()?;
         Ok(())
     }
 
     pub fn finalize(self) -> Result<()> {
         self.conn.close().map_err(|(_, e)| MallardError::DuckDb(e))?;
-        if self.final_path.exists() {
-            std::fs::remove_file(&self.final_path)?;
+        match std::fs::remove_file(&self.final_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
         std::fs::rename(&self.tmp_path, &self.final_path)?;
         Ok(())
@@ -190,11 +221,3 @@ fn seed_metadata(conn: &Connection, meta: &Metadata) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn _kind_strs() -> Vec<&'static str> {
-    vec![
-        SymbolKind::Function.as_str(),
-        EdgeKind::Calls.as_str(),
-        FileStatus::Indexed.as_str(),
-    ]
-}

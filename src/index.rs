@@ -1,15 +1,20 @@
-use std::collections::BTreeMap;
-
 use tracing::{info, info_span, warn};
 
 use crate::core::{
-    BuildRequest, BuildSummary, Counters, FileId, FileRecord, FileStatus, FileTiming,
+    BuildRequest, BuildSummary, Counters, EdgeKind, FileId, FileRecord, FileStatus, FileTiming,
     INDEXER_VERSION, MallardError, Metadata, Result,
 };
 use crate::parser::{ParsedFile, RustParser};
 use crate::rules::RuleSet;
 use crate::store::IndexWriter;
 use crate::walk::{self, WalkEntry, WalkOptions};
+
+const EDGE_KINDS_FOR_COUNTERS: &[EdgeKind] = &[
+    EdgeKind::Calls,
+    EdgeKind::Imports,
+    EdgeKind::Contains,
+    EdgeKind::References,
+];
 
 pub fn build(req: BuildRequest) -> Result<BuildSummary> {
     let started = std::time::Instant::now();
@@ -68,37 +73,28 @@ pub fn build(req: BuildRequest) -> Result<BuildSummary> {
                     &mut file_timings,
                 ) {
                     warn!(path = %entry.relative_path, error = %e, "file processing failed");
-                    counters.parse_errors += 1;
                 }
             }
             FileStatus::Unparseable => {
                 counters.parse_errors += 1;
             }
             other => {
-                let reason = other.as_str().to_string();
-                *counters.files_skipped_by_reason.entry(reason).or_insert(0) += 1;
+                *counters
+                    .files_skipped_by_reason
+                    .entry(other.as_str().to_string())
+                    .or_insert(0) += 1;
             }
         }
     }
 
     writer.finalize()?;
 
-    counters
-        .edges_by_kind
-        .entry("calls".to_string())
-        .or_insert(0);
-    counters
-        .edges_by_kind
-        .entry("imports".to_string())
-        .or_insert(0);
-    counters
-        .edges_by_kind
-        .entry("contains".to_string())
-        .or_insert(0);
-    counters
-        .edges_by_kind
-        .entry("references".to_string())
-        .or_insert(0);
+    for kind in EDGE_KINDS_FOR_COUNTERS {
+        counters
+            .edges_by_kind
+            .entry(kind.as_str().to_string())
+            .or_insert(0);
+    }
 
     file_timings.sort_by(|a, b| {
         (b.parse_ms + b.query_ms + b.rules_ms).cmp(&(a.parse_ms + a.query_ms + a.rules_ms))
@@ -126,7 +122,7 @@ fn process_indexed_file(
     timings: &mut Vec<FileTiming>,
 ) -> Result<()> {
     let source = std::fs::read(&entry.path)?;
-    let language = entry.language.as_deref().unwrap_or("rust");
+    let language = entry.language.as_deref().unwrap_or_default();
 
     let t_rules = std::time::Instant::now();
     let findings = rules.run(file_id, &source, language);
@@ -134,36 +130,25 @@ fn process_indexed_file(
 
     let parsed: ParsedFile = parser.parse_file(file_id, &entry.relative_path, source)?;
 
-    for pe in &parsed.parse_errors {
-        writer.append_parse_error(pe)?;
-        counters.parse_errors += 1;
-    }
+    writer.append_parse_errors(&parsed.parse_errors)?;
+    counters.parse_errors += parsed.parse_errors.len() as u64;
 
-    let mut edge_kind_counts: BTreeMap<String, u64> = BTreeMap::new();
+    writer.append_symbols(file_id, &parsed.symbols)?;
+    counters.symbols += parsed.symbols.len() as u64;
 
-    for sym in &parsed.symbols {
-        writer.append_symbol(file_id, sym)?;
-        counters.symbols += 1;
-    }
-
+    writer.append_edges(&parsed.edges)?;
     for edge in &parsed.edges {
-        writer.append_edge(edge)?;
-        *edge_kind_counts
+        *counters
+            .edges_by_kind
             .entry(edge.kind.as_str().to_string())
             .or_insert(0) += 1;
     }
 
-    for finding in &findings {
-        writer.append_finding(finding)?;
-        counters.findings += 1;
-    }
+    writer.append_findings(&findings)?;
+    counters.findings += findings.len() as u64;
 
     if parsed.parse_errors.is_empty() {
         counters.files_indexed += 1;
-    }
-
-    for (k, v) in edge_kind_counts {
-        *counters.edges_by_kind.entry(k).or_insert(0) += v;
     }
 
     timings.push(FileTiming {
@@ -178,9 +163,9 @@ fn process_indexed_file(
 
 fn current_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{secs}")
+        .unwrap_or(0)
+        .to_string()
 }

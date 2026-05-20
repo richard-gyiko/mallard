@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use tree_sitter::{Node, Parser as TsParser, Query, QueryCursor, StreamingIterator, Tree};
 
 use crate::core::{
@@ -48,6 +46,7 @@ pub struct ParsedFile {
 pub struct RustParser {
     parser: TsParser,
     query: Query,
+    cursor: QueryCursor,
 }
 
 impl RustParser {
@@ -56,7 +55,11 @@ impl RustParser {
         let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
         parser.set_language(&language)?;
         let query = Query::new(&language, RUST_QUERY)?;
-        Ok(RustParser { parser, query })
+        Ok(RustParser {
+            parser,
+            query,
+            cursor: QueryCursor::new(),
+        })
     }
 
     pub fn parse_file(
@@ -78,7 +81,7 @@ impl RustParser {
         }
 
         let t_query = std::time::Instant::now();
-        let (symbols, edges) = self.extract(&tree, &source, file_id, relative_path)?;
+        let (symbols, edges) = self.extract(&tree, &source, file_id, relative_path);
         let query_ms = t_query.elapsed().as_millis() as u64;
 
         Ok(ParsedFile {
@@ -94,18 +97,17 @@ impl RustParser {
     }
 
     fn extract(
-        &self,
+        &mut self,
         tree: &Tree,
         source: &[u8],
         file_id: FileId,
         relative_path: &str,
-    ) -> Result<(Vec<Symbol>, Vec<Edge>)> {
-        let mut cursor = QueryCursor::new();
+    ) -> (Vec<Symbol>, Vec<Edge>) {
         let mut symbols: Vec<Symbol> = Vec::new();
         let mut references: Vec<(Node, String, EdgeKind)> = Vec::new();
         let mut imports: Vec<(Node, String)> = Vec::new();
 
-        let mut matches = cursor.matches(&self.query, tree.root_node(), source);
+        let mut matches = self.cursor.matches(&self.query, tree.root_node(), source);
         while let Some(m) = matches.next() {
             let pattern = m.pattern_index;
             match pattern {
@@ -131,10 +133,14 @@ impl RustParser {
 
         let mut edges: Vec<Edge> = Vec::new();
 
-        let symbols_by_name: std::collections::HashMap<String, &Symbol> = symbols
-            .iter()
-            .map(|s| (s.qualified_name.clone(), s))
-            .collect();
+        let mut symbols_by_name: std::collections::HashMap<&str, &Symbol> =
+            std::collections::HashMap::with_capacity(symbols.len() * 2);
+        for s in &symbols {
+            symbols_by_name.insert(s.qualified_name.as_str(), s);
+            if let Some(short) = short_name(&s.qualified_name) {
+                symbols_by_name.entry(short).or_insert(s);
+            }
+        }
 
         let file_pseudo_src = SymbolId(format!("file:{}", relative_path));
         for sym in &symbols {
@@ -152,7 +158,7 @@ impl RustParser {
             let enclosing = find_enclosing_definition(node, &symbols)
                 .map(|s| s.id.clone())
                 .unwrap_or_else(|| file_pseudo_src.clone());
-            let dst = symbols_by_name.get(&name).map(|s| s.id.clone());
+            let dst = symbols_by_name.get(name.as_str()).map(|s| s.id.clone());
             let dst_unresolved = if dst.is_none() { Some(name.clone()) } else { None };
             edges.push(Edge {
                 src: enclosing,
@@ -178,7 +184,7 @@ impl RustParser {
         symbols.sort_by_key(|s| s.anchor.start_byte);
         edges.sort_by_key(|e| (e.kind.as_str(), e.order_key));
 
-        Ok((symbols, edges))
+        (symbols, edges)
     }
 }
 
@@ -280,29 +286,23 @@ fn enclosing_impl_type(def_node: Node, source: &[u8]) -> Option<String> {
     let mut cur = def_node.parent();
     while let Some(p) = cur {
         if p.kind() == "impl_item" {
-            let mut walker = p.walk();
-            for child in p.children(&mut walker) {
-                if child.kind() == "type_identifier"
-                    || child.kind() == "generic_type"
-                    || child.kind() == "scoped_type_identifier"
-                {
-                    return Some(node_text(child, source));
-                }
-            }
-            return None;
+            let type_node = p
+                .child_by_field_name("type")
+                .or_else(|| p.child_by_field_name("trait"))?;
+            return Some(node_text(type_node, source));
         }
         if p.kind() == "trait_item" {
-            let mut walker = p.walk();
-            for child in p.children(&mut walker) {
-                if child.kind() == "type_identifier" {
-                    return Some(node_text(child, source));
-                }
-            }
-            return None;
+            return p
+                .child_by_field_name("name")
+                .map(|n| node_text(n, source));
         }
         cur = p.parent();
     }
     None
+}
+
+fn short_name(qualified: &str) -> Option<&str> {
+    qualified.rsplit_once("::").map(|(_, last)| last)
 }
 
 fn find_enclosing_definition<'a>(node: Node, symbols: &'a [Symbol]) -> Option<&'a Symbol> {
@@ -349,7 +349,3 @@ fn collect_errors(node: Node, source: &[u8], file_id: FileId, out: &mut Vec<Pars
     }
 }
 
-#[allow(dead_code)]
-pub fn _validate(_p: &Path) -> Result<()> {
-    Ok(())
-}

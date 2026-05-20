@@ -24,7 +24,7 @@ struct IndexArgs {
     /// Repository root to index.
     path: PathBuf,
 
-    /// Commit SHA the index represents (caller-supplied in v0).
+    /// Commit SHA the index represents.
     #[arg(long)]
     sha: String,
 
