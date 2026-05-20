@@ -1,7 +1,8 @@
 use tree_sitter::{Node, Parser as TsParser, Query, QueryCursor, StreamingIterator, Tree};
 
 use crate::core::{
-    Anchor, Edge, EdgeKind, FileId, MallardError, ParseError, Result, Symbol, SymbolId, SymbolKind,
+    Anchor, Edge, EdgeKind, FileId, MallardError, ParseError, ParsedFile, Result, Symbol, SymbolId,
+    SymbolKind,
 };
 
 const RUST_QUERY: &str = r#"
@@ -32,17 +33,6 @@ const RUST_QUERY: &str = r#"
 (use_declaration) @import.decl
 "#;
 
-pub struct ParsedFile {
-    pub file_id: FileId,
-    pub source: Vec<u8>,
-    pub tree: Tree,
-    pub symbols: Vec<Symbol>,
-    pub edges: Vec<Edge>,
-    pub parse_errors: Vec<ParseError>,
-    pub parse_ms: u64,
-    pub query_ms: u64,
-}
-
 pub struct RustParser {
     parser: TsParser,
     query: Query,
@@ -66,28 +56,26 @@ impl RustParser {
         &mut self,
         file_id: FileId,
         relative_path: &str,
-        source: Vec<u8>,
+        source: &[u8],
     ) -> Result<ParsedFile> {
         let t_parse = std::time::Instant::now();
         let tree = self
             .parser
-            .parse(&source, None)
+            .parse(source, None)
             .ok_or_else(|| MallardError::Other(format!("parser returned None for {relative_path}")))?;
         let parse_ms = t_parse.elapsed().as_millis() as u64;
 
         let mut parse_errors: Vec<ParseError> = Vec::new();
         if tree.root_node().has_error() {
-            collect_errors(tree.root_node(), &source, file_id, &mut parse_errors);
+            collect_errors(tree.root_node(), source, file_id, &mut parse_errors);
         }
 
         let t_query = std::time::Instant::now();
-        let (symbols, edges) = self.extract(&tree, &source, file_id, relative_path);
+        let (symbols, edges) = self.extract(&tree, source, file_id, relative_path);
         let query_ms = t_query.elapsed().as_millis() as u64;
 
         Ok(ParsedFile {
             file_id,
-            source,
-            tree,
             symbols,
             edges,
             parse_errors,

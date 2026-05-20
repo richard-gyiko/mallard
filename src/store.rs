@@ -3,62 +3,10 @@ use std::path::{Path, PathBuf};
 use duckdb::{Connection, params};
 
 use crate::core::{
-    Anchor, Edge, FileId, FileRecord, Finding, Metadata, MallardError, ParseError, Result, Symbol,
+    Anchor, Edge, FileId, FileRecord, Finding, Metadata, MallardError, ParseError, ParsedFile,
+    Result, Symbol,
 };
-
-const SCHEMA_DDL: &str = r#"
-CREATE TABLE files (
-    file_id      BIGINT PRIMARY KEY,
-    path         VARCHAR NOT NULL,
-    language     VARCHAR,
-    size_bytes   BIGINT,
-    status       VARCHAR
-);
-
-CREATE TABLE symbols (
-    symbol_id         VARCHAR PRIMARY KEY,
-    file_id           BIGINT NOT NULL,
-    qualified_name    VARCHAR NOT NULL,
-    kind              VARCHAR NOT NULL,
-    signature         VARCHAR,
-    anchor_start_byte BIGINT,
-    anchor_end_byte   BIGINT,
-    anchor_start_line INTEGER,
-    anchor_end_line   INTEGER
-);
-
-CREATE SEQUENCE seq_edge_id START 1;
-CREATE TABLE edges (
-    edge_id        BIGINT PRIMARY KEY DEFAULT nextval('seq_edge_id'),
-    src_symbol_id  VARCHAR NOT NULL,
-    dst_symbol_id  VARCHAR,
-    dst_unresolved VARCHAR,
-    kind           VARCHAR NOT NULL,
-    file_id        BIGINT NOT NULL
-);
-
-CREATE TABLE parse_errors (
-    file_id BIGINT NOT NULL,
-    message VARCHAR NOT NULL,
-    line    INTEGER,
-    col     INTEGER
-);
-
-CREATE SEQUENCE seq_finding_id START 1;
-CREATE TABLE findings (
-    finding_id BIGINT PRIMARY KEY DEFAULT nextval('seq_finding_id'),
-    rule_id    VARCHAR NOT NULL,
-    file_id    BIGINT NOT NULL,
-    start_line INTEGER,
-    end_line   INTEGER,
-    message    VARCHAR
-);
-
-CREATE TABLE metadata (
-    key   VARCHAR PRIMARY KEY,
-    value VARCHAR
-);
-"#;
+use crate::schema::{self, cols, metadata_keys, tables};
 
 pub struct IndexWriter {
     conn: Connection,
@@ -80,7 +28,7 @@ impl IndexWriter {
             Err(e) => return Err(e.into()),
         }
         let conn = Connection::open(&tmp_path)?;
-        conn.execute_batch(SCHEMA_DDL)?;
+        conn.execute_batch(schema::DDL)?;
         seed_metadata(&conn, meta)?;
         Ok(IndexWriter {
             conn,
@@ -89,8 +37,26 @@ impl IndexWriter {
         })
     }
 
-    pub fn append_file(&mut self, file: &FileRecord) -> Result<()> {
-        let mut app = self.conn.appender("files")?;
+    pub fn write_indexed(
+        &mut self,
+        file: &FileRecord,
+        parsed: &ParsedFile,
+        findings: &[Finding],
+    ) -> Result<()> {
+        self.append_file(file)?;
+        self.append_symbols(parsed.file_id, &parsed.symbols)?;
+        self.append_edges(&parsed.edges)?;
+        self.append_findings(findings)?;
+        self.append_parse_errors(&parsed.parse_errors)?;
+        Ok(())
+    }
+
+    pub fn write_skipped(&mut self, file: &FileRecord) -> Result<()> {
+        self.append_file(file)
+    }
+
+    fn append_file(&mut self, file: &FileRecord) -> Result<()> {
+        let mut app = self.conn.appender(tables::FILES)?;
         app.append_row(params![
             file.id,
             file.path.as_str(),
@@ -102,11 +68,11 @@ impl IndexWriter {
         Ok(())
     }
 
-    pub fn append_symbols(&mut self, file_id: FileId, syms: &[Symbol]) -> Result<()> {
+    fn append_symbols(&mut self, file_id: FileId, syms: &[Symbol]) -> Result<()> {
         if syms.is_empty() {
             return Ok(());
         }
-        let mut app = self.conn.appender("symbols")?;
+        let mut app = self.conn.appender(tables::SYMBOLS)?;
         for sym in syms {
             let a: Anchor = sym.anchor;
             app.append_row(params![
@@ -125,16 +91,20 @@ impl IndexWriter {
         Ok(())
     }
 
-    pub fn append_edges(&mut self, edges: &[Edge]) -> Result<()> {
+    fn append_edges(&mut self, edges: &[Edge]) -> Result<()> {
         if edges.is_empty() {
             return Ok(());
         }
-        let mut app = self
-            .conn
-            .appender_with_columns(
-                "edges",
-                &["src_symbol_id", "dst_symbol_id", "dst_unresolved", "kind", "file_id"],
-            )?;
+        let mut app = self.conn.appender_with_columns(
+            tables::EDGES,
+            &[
+                cols::edges::SRC_SYMBOL_ID,
+                cols::edges::DST_SYMBOL_ID,
+                cols::edges::DST_UNRESOLVED,
+                cols::edges::KIND,
+                cols::edges::FILE_ID,
+            ],
+        )?;
         for edge in edges {
             app.append_row(params![
                 edge.src.as_str(),
@@ -148,16 +118,20 @@ impl IndexWriter {
         Ok(())
     }
 
-    pub fn append_findings(&mut self, findings: &[Finding]) -> Result<()> {
+    fn append_findings(&mut self, findings: &[Finding]) -> Result<()> {
         if findings.is_empty() {
             return Ok(());
         }
-        let mut app = self
-            .conn
-            .appender_with_columns(
-                "findings",
-                &["rule_id", "file_id", "start_line", "end_line", "message"],
-            )?;
+        let mut app = self.conn.appender_with_columns(
+            tables::FINDINGS,
+            &[
+                cols::findings::RULE_ID,
+                cols::findings::FILE_ID,
+                cols::findings::START_LINE,
+                cols::findings::END_LINE,
+                cols::findings::MESSAGE,
+            ],
+        )?;
         for f in findings {
             app.append_row(params![
                 f.rule_id.as_str(),
@@ -171,11 +145,11 @@ impl IndexWriter {
         Ok(())
     }
 
-    pub fn append_parse_errors(&mut self, errs: &[ParseError]) -> Result<()> {
+    fn append_parse_errors(&mut self, errs: &[ParseError]) -> Result<()> {
         if errs.is_empty() {
             return Ok(());
         }
-        let mut app = self.conn.appender("parse_errors")?;
+        let mut app = self.conn.appender(tables::PARSE_ERRORS)?;
         for err in errs {
             app.append_row(params![
                 err.file_id,
@@ -207,17 +181,29 @@ fn tmp_path_for(final_path: &Path) -> PathBuf {
 }
 
 fn seed_metadata(conn: &Connection, meta: &Metadata) -> Result<()> {
-    let mut stmt = conn.prepare("INSERT INTO metadata (key, value) VALUES (?, ?)")?;
-    stmt.execute(params!["sha", meta.sha.as_str()])?;
-    stmt.execute(params!["indexer_version", meta.indexer_version.as_str()])?;
-    if let Some(h) = &meta.rule_set_hash {
-        stmt.execute(params!["rule_set_hash", h.as_str()])?;
-    }
-    stmt.execute(params!["built_at", meta.built_at.as_str()])?;
+    let sql = format!(
+        "INSERT INTO {} ({}, {}) VALUES (?, ?)",
+        tables::METADATA,
+        cols::metadata::KEY,
+        cols::metadata::VALUE,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.execute(params![metadata_keys::SHA, meta.sha.as_str()])?;
     stmt.execute(params![
-        "language_allow_list",
+        metadata_keys::INDEXER_VERSION,
+        meta.indexer_version.as_str()
+    ])?;
+    if let Some(h) = &meta.rule_set_hash {
+        stmt.execute(params![metadata_keys::RULE_SET_HASH, h.as_str()])?;
+    }
+    stmt.execute(params![metadata_keys::BUILT_AT, meta.built_at.as_str()])?;
+    stmt.execute(params![
+        metadata_keys::LANGUAGE_ALLOW_LIST,
         meta.language_allow_list.join(",").as_str()
+    ])?;
+    stmt.execute(params![
+        metadata_keys::INDEX_FORMAT_VERSION,
+        schema::INDEX_FORMAT_VERSION.to_string().as_str()
     ])?;
     Ok(())
 }
-

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use duckdb::Connection;
+use mallard::schema::{cols, metadata_keys, tables};
 use mallard::{BuildRequest, build};
 use tempfile::TempDir;
 
@@ -23,6 +24,34 @@ fn make_request(root: PathBuf, sha: &str, out: PathBuf) -> BuildRequest {
     }
 }
 
+fn count(conn: &Connection, table: &str) -> i64 {
+    conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        .unwrap()
+}
+
+fn count_where(conn: &Connection, table: &str, column: &str, value: &str) -> i64 {
+    conn.query_row(
+        &format!("SELECT count(*) FROM {table} WHERE {column} = ?"),
+        [value],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn metadata_value(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row(
+        &format!(
+            "SELECT {} FROM {} WHERE {} = ?",
+            cols::metadata::VALUE,
+            tables::METADATA,
+            cols::metadata::KEY,
+        ),
+        [key],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
 #[test]
 fn happy_path_indexes_sample_repo() {
     let tmp = TempDir::new().unwrap();
@@ -35,79 +64,41 @@ fn happy_path_indexes_sample_repo() {
 
     let conn = Connection::open(&out).unwrap();
 
-    let files: i64 = conn
-        .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
-        .unwrap();
+    let files = count(&conn, tables::FILES);
     assert!(files >= 4, "expected at least 4 files indexed, got {files}");
 
-    let functions: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM symbols WHERE kind = 'function'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let functions = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "function");
     assert!(
         functions >= 3,
         "expected at least 3 function symbols (double, greet, main), got {functions}"
     );
 
-    let methods: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM symbols WHERE kind = 'method'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let methods = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "method");
     assert!(
         methods >= 2,
         "expected at least 2 methods on Counter (new, bump), got {methods}"
     );
 
-    let structs: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM symbols WHERE kind = 'struct'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let structs = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "struct");
     assert!(structs >= 1, "expected at least 1 struct (Counter), got {structs}");
 
-    let contains: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM edges WHERE kind = 'contains'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let contains = count_where(&conn, tables::EDGES, cols::edges::KIND, "contains");
     assert!(contains > 0, "expected contains edges, got {contains}");
 
-    let calls: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM edges WHERE kind = 'calls'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let calls = count_where(&conn, tables::EDGES, cols::edges::KIND, "calls");
     assert!(calls > 0, "expected calls edges, got {calls}");
 
-    let imports: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM edges WHERE kind = 'imports'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let imports = count_where(&conn, tables::EDGES, cols::edges::KIND, "imports");
     assert!(imports > 0, "expected imports edges, got {imports}");
 
-    let sha_in_db: String = conn
-        .query_row(
-            "SELECT value FROM metadata WHERE key = 'sha'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(sha_in_db, "deadbeefcafe");
+    assert_eq!(
+        metadata_value(&conn, metadata_keys::SHA).as_deref(),
+        Some("deadbeefcafe"),
+    );
+    assert!(
+        metadata_value(&conn, metadata_keys::INDEX_FORMAT_VERSION).is_some(),
+        "index_format_version stamped in metadata"
+    );
 }
 
 #[test]
@@ -142,16 +133,11 @@ fn empty_repo_produces_valid_index() {
 
     assert_eq!(summary.counters.symbols, 0);
     let conn = Connection::open(&out).unwrap();
-    let files: i64 = conn
-        .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(files, 0);
-    let sha: String = conn
-        .query_row("SELECT value FROM metadata WHERE key = 'sha'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(sha, "0000000000");
+    assert_eq!(count(&conn, tables::FILES), 0);
+    assert_eq!(
+        metadata_value(&conn, metadata_keys::SHA).as_deref(),
+        Some("0000000000"),
+    );
 }
 
 #[test]
@@ -161,9 +147,7 @@ fn parse_failure_is_recorded_and_other_files_continue() {
     build(make_request(fixture_root(), "deadbeefcafe", out.clone())).unwrap();
     let conn = Connection::open(&out).unwrap();
 
-    let parse_err_count: i64 = conn
-        .query_row("SELECT count(*) FROM parse_errors", [], |r| r.get(0))
-        .unwrap();
+    let parse_err_count = count(&conn, tables::PARSE_ERRORS);
     assert!(
         parse_err_count > 0,
         "expected parse_errors row for broken.rs, got {parse_err_count}"
@@ -171,7 +155,14 @@ fn parse_failure_is_recorded_and_other_files_continue() {
 
     let other_symbols: i64 = conn
         .query_row(
-            "SELECT count(*) FROM symbols s JOIN files f ON f.file_id = s.file_id WHERE f.path != 'broken.rs'",
+            &format!(
+                "SELECT count(*) FROM {s} JOIN {f} ON {f}.{fid} = {s}.{sfid} WHERE {f}.{p} != 'broken.rs'",
+                s = tables::SYMBOLS,
+                f = tables::FILES,
+                fid = cols::files::FILE_ID,
+                sfid = cols::symbols::FILE_ID,
+                p = cols::files::PATH,
+            ),
             [],
             |r| r.get(0),
         )
@@ -199,18 +190,19 @@ fn skip_by_size_marker_is_recorded() {
     .unwrap();
 
     let conn = Connection::open(&out).unwrap();
-    let skipped: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM files WHERE status = 'skipped:size'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let skipped = count_where(&conn, tables::FILES, cols::files::STATUS, "skipped:size");
     assert_eq!(skipped, 1, "expected one size-skipped file");
 
     let tiny_symbols: i64 = conn
         .query_row(
-            "SELECT count(*) FROM symbols s JOIN files f ON f.file_id = s.file_id WHERE f.path = 'small.rs'",
+            &format!(
+                "SELECT count(*) FROM {s} JOIN {f} ON {f}.{fid} = {s}.{sfid} WHERE {f}.{p} = 'small.rs'",
+                s = tables::SYMBOLS,
+                f = tables::FILES,
+                fid = cols::files::FILE_ID,
+                sfid = cols::symbols::FILE_ID,
+                p = cols::files::PATH,
+            ),
             [],
             |r| r.get(0),
         )
@@ -221,7 +213,11 @@ fn skip_by_size_marker_is_recorded() {
 fn symbol_ids(path: &PathBuf) -> Vec<String> {
     let conn = Connection::open(path).unwrap();
     let mut stmt = conn
-        .prepare("SELECT symbol_id FROM symbols ORDER BY symbol_id")
+        .prepare(&format!(
+            "SELECT {sid} FROM {s} ORDER BY {sid}",
+            sid = cols::symbols::SYMBOL_ID,
+            s = tables::SYMBOLS,
+        ))
         .unwrap();
     let rows: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(0))
@@ -234,9 +230,15 @@ fn symbol_ids(path: &PathBuf) -> Vec<String> {
 fn edge_tuples(path: &PathBuf) -> Vec<(String, Option<String>, Option<String>, String, i64)> {
     let conn = Connection::open(path).unwrap();
     let mut stmt = conn
-        .prepare(
-            "SELECT src_symbol_id, dst_symbol_id, dst_unresolved, kind, file_id FROM edges ORDER BY kind, src_symbol_id, dst_symbol_id, dst_unresolved",
-        )
+        .prepare(&format!(
+            "SELECT {src}, {dst}, {unr}, {kind}, {fid} FROM {e} ORDER BY {kind}, {src}, {dst}, {unr}",
+            src = cols::edges::SRC_SYMBOL_ID,
+            dst = cols::edges::DST_SYMBOL_ID,
+            unr = cols::edges::DST_UNRESOLVED,
+            kind = cols::edges::KIND,
+            fid = cols::edges::FILE_ID,
+            e = tables::EDGES,
+        ))
         .unwrap();
     let rows: Vec<(String, Option<String>, Option<String>, String, i64)> = stmt
         .query_map([], |row| {

@@ -184,6 +184,56 @@ pub struct Metadata {
 }
 
 #[derive(Debug, Clone)]
+pub struct ParsedFile {
+    pub file_id: FileId,
+    pub symbols: Vec<Symbol>,
+    pub edges: Vec<Edge>,
+    pub parse_errors: Vec<ParseError>,
+    pub parse_ms: u64,
+    pub query_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessOutcome {
+    pub file_record: FileRecord,
+    pub parsed: Option<ParsedFile>,
+    pub findings: Vec<Finding>,
+    pub timing: Option<FileTiming>,
+}
+
+impl Counters {
+    pub fn record(&mut self, outcome: &ProcessOutcome) {
+        match outcome.file_record.status {
+            FileStatus::Indexed => {
+                if let Some(parsed) = &outcome.parsed {
+                    self.symbols += parsed.symbols.len() as u64;
+                    self.parse_errors += parsed.parse_errors.len() as u64;
+                    for edge in &parsed.edges {
+                        *self
+                            .edges_by_kind
+                            .entry(edge.kind.as_str().to_string())
+                            .or_insert(0) += 1;
+                    }
+                    if parsed.parse_errors.is_empty() {
+                        self.files_indexed += 1;
+                    }
+                }
+                self.findings += outcome.findings.len() as u64;
+            }
+            FileStatus::Unparseable => {
+                self.parse_errors += 1;
+            }
+            other => {
+                *self
+                    .files_skipped_by_reason
+                    .entry(other.as_str().to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct BuildRequest {
     pub root: PathBuf,
     pub sha: String,
