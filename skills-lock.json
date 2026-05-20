@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "grill-with-docs": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/grill-with-docs/SKILL.md",
+      "computedHash": "59849672f8fce76b73055f6c9270236212e444c9aa63d02481bdf3cf788edb9f"
+    },
+    "improve-codebase-architecture": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/improve-codebase-architecture/SKILL.md",
+      "computedHash": "5d9444ffe5c240f2d20081c42c547112e1b8c372375a14e4c98df4d94bde11e1"
+    },
+    "spec-driven-docs": {
+      "source": "richard-gyiko/dev-stuff",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/spec-driven-docs/SKILL.md",
+      "computedHash": "feb70490700f7e7e54780e424bba81b0efb31c330c8861db6a66d06c70cd7bdc"
+    },
+    "zoom-out": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/zoom-out/SKILL.md",
+      "computedHash": "a8b8ed45609fdfa9f184d0c9f69326e43822a42eebea14db2792d777373de562"
+    }
+  }
+}
