@@ -12,6 +12,13 @@ fn fixture_root() -> PathBuf {
         .join("sample-rust")
 }
 
+fn fixture_rules() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("rules.yml")
+}
+
 fn make_request(root: PathBuf, sha: &str, out: PathBuf) -> BuildRequest {
     BuildRequest {
         root,
@@ -21,6 +28,18 @@ fn make_request(root: PathBuf, sha: &str, out: PathBuf) -> BuildRequest {
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["rust".to_string()],
         slowest_files_n: 10,
+    }
+}
+
+fn make_request_with_rules(
+    root: PathBuf,
+    sha: &str,
+    out: PathBuf,
+    rules: PathBuf,
+) -> BuildRequest {
+    BuildRequest {
+        rules_path: Some(rules),
+        ..make_request(root, sha, out)
     }
 }
 
@@ -99,6 +118,64 @@ fn happy_path_indexes_sample_repo() {
         metadata_value(&conn, metadata_keys::INDEX_FORMAT_VERSION).is_some(),
         "index_format_version stamped in metadata"
     );
+}
+
+#[test]
+fn rules_produce_findings_and_metadata_hash() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("rules.duckdb");
+    let summary = build(make_request_with_rules(
+        fixture_root(),
+        "deadbeefcafe",
+        out.clone(),
+        fixture_rules(),
+    ))
+    .unwrap();
+
+    assert!(
+        summary.counters.findings >= 2,
+        "expected at least 2 findings (format! in greet.rs, println! in main.rs), got {}",
+        summary.counters.findings
+    );
+    assert!(summary.rule_set_hash.is_some(), "rule_set_hash stamped");
+
+    let conn = Connection::open(&out).unwrap();
+    let total = count(&conn, tables::FINDINGS);
+    assert_eq!(
+        total as u64,
+        summary.counters.findings,
+        "counters.findings matches findings table row count",
+    );
+
+    let format_hits =
+        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "rust-format-macro");
+    assert!(
+        format_hits >= 1,
+        "expected at least 1 hit for rust-format-macro, got {format_hits}"
+    );
+    let println_hits =
+        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "rust-println-macro");
+    assert!(
+        println_hits >= 1,
+        "expected at least 1 hit for rust-println-macro, got {println_hits}"
+    );
+
+    assert_eq!(
+        metadata_value(&conn, metadata_keys::RULE_SET_HASH),
+        summary.rule_set_hash,
+        "rule_set_hash in metadata table matches summary",
+    );
+}
+
+#[test]
+fn no_rules_produces_zero_findings() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("no-rules.duckdb");
+    let summary = build(make_request(fixture_root(), "deadbeefcafe", out.clone())).unwrap();
+    assert_eq!(summary.counters.findings, 0);
+    let conn = Connection::open(&out).unwrap();
+    assert_eq!(count(&conn, tables::FINDINGS), 0);
+    assert!(summary.rule_set_hash.is_none());
 }
 
 #[test]
