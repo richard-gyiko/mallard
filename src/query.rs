@@ -92,6 +92,50 @@ pub struct MetadataRecord {
     pub index_format_version: u32,
 }
 
+/// Adapter-facing request that crosses the query seam. CLI marshals argv into
+/// one of these; future adapters (MCP, HTTP) build the same shape. The typed
+/// per-method API stays public for in-process Rust callers (retrieval,
+/// PR review) — see CONTEXT.md.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QueryRequest {
+    LookupSymbol { id: SymbolId },
+    Neighbors {
+        id: SymbolId,
+        #[serde(default)]
+        kinds: Vec<EdgeKind>,
+        direction: Direction,
+    },
+    Expand {
+        id: SymbolId,
+        depth: u32,
+        #[serde(default)]
+        kinds: Vec<EdgeKind>,
+        direction: Direction,
+    },
+    Findings {
+        #[serde(flatten)]
+        filter: FindingFilter,
+    },
+    SymbolsInFile { path: String },
+    ImportersOfFile { path: String },
+    FilesAtPrefix { prefix: String },
+    Metadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", content = "value")]
+pub enum QueryResult {
+    LookupSymbol(Option<SymbolRecord>),
+    Neighbors(Vec<NeighborEdge>),
+    Expand(Subgraph),
+    Findings(Vec<FindingRecord>),
+    SymbolsInFile(Vec<SymbolRecord>),
+    ImportersOfFile(Vec<SymbolRecord>),
+    FilesAtPrefix(Vec<FileRecordOut>),
+    Metadata(MetadataRecord),
+}
+
 /// Verified handle to a built Index. `open` checks `index_format_version` once;
 /// every method on `&self` reads from the same opened DuckDB connection.
 pub struct IndexReader {
@@ -288,7 +332,7 @@ impl IndexReader {
         })
     }
 
-    pub fn findings(&self, filter: FindingFilter) -> Result<Vec<FindingRecord>> {
+    pub fn findings(&self, filter: &FindingFilter) -> Result<Vec<FindingRecord>> {
         let mut symbol_anchor: Option<(FileId, u32, u32)> = None;
         if let Some(sid) = &filter.symbol_id {
             match fetch_symbol(&self.conn, sid)? {
@@ -346,6 +390,36 @@ impl IndexReader {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    pub fn run(&self, request: &QueryRequest) -> Result<QueryResult> {
+        match request {
+            QueryRequest::LookupSymbol { id } => {
+                Ok(QueryResult::LookupSymbol(self.lookup_symbol(id)?))
+            }
+            QueryRequest::Neighbors { id, kinds, direction } => Ok(QueryResult::Neighbors(
+                self.neighbors(id, kinds, *direction)?,
+            )),
+            QueryRequest::Expand {
+                id,
+                depth,
+                kinds,
+                direction,
+            } => Ok(QueryResult::Expand(
+                self.expand(id, *depth, kinds, *direction)?,
+            )),
+            QueryRequest::Findings { filter } => Ok(QueryResult::Findings(self.findings(filter)?)),
+            QueryRequest::SymbolsInFile { path } => {
+                Ok(QueryResult::SymbolsInFile(self.symbols_in_file(path)?))
+            }
+            QueryRequest::ImportersOfFile { path } => {
+                Ok(QueryResult::ImportersOfFile(self.importers_of_file(path)?))
+            }
+            QueryRequest::FilesAtPrefix { prefix } => {
+                Ok(QueryResult::FilesAtPrefix(self.files_at_prefix(prefix)?))
+            }
+            QueryRequest::Metadata => Ok(QueryResult::Metadata(self.metadata()?)),
+        }
     }
 
     pub fn importers_of_file(&self, file_path: &str) -> Result<Vec<SymbolRecord>> {

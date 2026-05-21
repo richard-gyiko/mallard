@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use mallard::{
-    BuildRequest, Direction, EdgeKind, FindingFilter, IndexReader, SymbolId, build,
+    BuildRequest, Direction, EdgeKind, FindingFilter, IndexReader, QueryRequest, SymbolId, build,
 };
 
 #[derive(Parser, Debug)]
@@ -173,63 +173,60 @@ fn print<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
 }
 
 fn run_query(args: QueryArgs) -> anyhow::Result<()> {
-    match args.sub {
-        QueryCmd::Symbol { id, index } => {
-            let out = IndexReader::open(&index)?.lookup_symbol(&SymbolId(id))?;
-            print(&out)
-        }
+    let (index, request) = to_request(args.sub)?;
+    let result = IndexReader::open(&index)?.run(&request)?;
+    print(&result)
+}
+
+fn to_request(cmd: QueryCmd) -> anyhow::Result<(std::path::PathBuf, QueryRequest)> {
+    Ok(match cmd {
+        QueryCmd::Symbol { id, index } => (index, QueryRequest::LookupSymbol { id: SymbolId(id) }),
         QueryCmd::Neighbors {
             id,
             index,
             kind,
             direction,
-        } => {
-            let kinds = parse_kinds(&kind)?;
-            let dir = Direction::from_str(&direction)?;
-            let out = IndexReader::open(&index)?.neighbors(&SymbolId(id), &kinds, dir)?;
-            print(&out)
-        }
+        } => (
+            index,
+            QueryRequest::Neighbors {
+                id: SymbolId(id),
+                kinds: parse_kinds(&kind)?,
+                direction: Direction::from_str(&direction)?,
+            },
+        ),
         QueryCmd::Expand {
             id,
             index,
             depth,
             kind,
             direction,
-        } => {
-            let kinds = parse_kinds(&kind)?;
-            let dir = Direction::from_str(&direction)?;
-            let out = IndexReader::open(&index)?.expand(&SymbolId(id), depth, &kinds, dir)?;
-            print(&out)
-        }
+        } => (
+            index,
+            QueryRequest::Expand {
+                id: SymbolId(id),
+                depth,
+                kinds: parse_kinds(&kind)?,
+                direction: Direction::from_str(&direction)?,
+            },
+        ),
         QueryCmd::Findings {
             index,
             rule,
             path_prefix,
             symbol_id,
-        } => {
-            let filter = FindingFilter {
-                rule_id: rule,
-                path_prefix,
-                symbol_id: symbol_id.map(SymbolId),
-            };
-            let out = IndexReader::open(&index)?.findings(filter)?;
-            print(&out)
-        }
-        QueryCmd::SymbolsInFile { path, index } => {
-            let out = IndexReader::open(&index)?.symbols_in_file(&path)?;
-            print(&out)
-        }
-        QueryCmd::ImportersOf { path, index } => {
-            let out = IndexReader::open(&index)?.importers_of_file(&path)?;
-            print(&out)
-        }
-        QueryCmd::Files { index, prefix } => {
-            let out = IndexReader::open(&index)?.files_at_prefix(&prefix)?;
-            print(&out)
-        }
-        QueryCmd::Metadata { index } => {
-            let out = IndexReader::open(&index)?.metadata()?;
-            print(&out)
-        }
-    }
+        } => (
+            index,
+            QueryRequest::Findings {
+                filter: FindingFilter {
+                    rule_id: rule,
+                    path_prefix,
+                    symbol_id: symbol_id.map(SymbolId),
+                },
+            },
+        ),
+        QueryCmd::SymbolsInFile { path, index } => (index, QueryRequest::SymbolsInFile { path }),
+        QueryCmd::ImportersOf { path, index } => (index, QueryRequest::ImportersOfFile { path }),
+        QueryCmd::Files { index, prefix } => (index, QueryRequest::FilesAtPrefix { prefix }),
+        QueryCmd::Metadata { index } => (index, QueryRequest::Metadata),
+    })
 }
