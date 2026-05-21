@@ -172,9 +172,22 @@ For each changed symbol, decide whether to emit comments. Two channels:
 
 For every emitted comment, the spec ([docs/specs/pr-review/pull-request-review.md](../../../docs/specs/pr-review/pull-request-review.md)) requires citing the evidence: at minimum a symbol ID, optionally edge paths and rule IDs. Comments without citations must not be emitted.
 
+**Bundle by pattern when N changed symbols ≫ comment budget.** Refactor-shaped PRs routinely touch 20–50 symbols in mechanically uniform ways. Emitting one comment per symbol blows the budget and dilutes signal. Before generating per-symbol comments, group the changed-symbol set by **pattern**:
+
+- **Free-fn-to-method migration**: ≥3 `removed` free fns in one file with matching `added` methods on a new struct in the same file, plus modified-body call-site updates in callers. Emit **one bundled comment** describing the pattern: "9 free fns in `query.rs` moved to methods on the new `IndexReader` struct; all call sites updated; 0 orphan callers from stage 4.5." Cite the full set of affected symbol IDs at the end of the comment so a reviewer can drill in.
+- **Test-suite migration**: ≥3 test functions in `tests/*` with the same modified-body delta (e.g. all replaced `metadata` with `open_reader + metadata`). Emit **one bundled comment**: "11 tests migrated to the new `open_reader` helper; pattern consistent."
+- **Trait-impl rollout**: ≥3 added methods sharing the same `Type::` prefix on a new struct. Bundle as "added `IndexReader` API surface with 9 methods."
+- **Constructor-call filter rollout** (PR #11-shaped): a new helper function + one modified-body edge in the only caller. Bundle the two changes into one comment, not two.
+
+Apply bundling **before** the cap-and-label step. A bundled comment counts as 1 against the budget, with N symbols cited inside it. Per-symbol comments only when the symbol's change is genuinely unique (different shape, different consequences) compared to the bundle's other members.
+
+If a PR's entire changed-symbol set fits one or two bundle patterns, the review may be 2–3 comments total rather than 30. That's the right shape — research finding: signal-to-noise dominates raw recall (CR-Bench, c-CRAB).
+
 ### 7. Cap and label
 
 Per-PR comment budget: default 10 total comments (5 deterministic-hard + 5 LLM-soft is a starting split; adjust per repo). Drop lowest-confidence comments first if over budget.
+
+Bundled comments (per the synthesis guidance above) count as 1 each regardless of how many symbols they cite. A 35-changed-symbol PR with two strong patterns lands as ~3 comments, not 35.
 
 ## Output
 
