@@ -316,9 +316,10 @@ fn is_constructor_call(
     if STDLIB_VARIANT_CONSTRUCTORS.contains(&name) {
         return true;
     }
-    if let Some(sym) = symbols_by_name.get(name) {
+    let sym = symbols_by_name.get(name).copied();
+    if let Some(s) = sym {
         if matches!(
-            sym.kind,
+            s.kind,
             SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::TypeAlias
         ) {
             return true;
@@ -334,9 +335,9 @@ fn is_constructor_call(
         .map(|c| c.is_ascii_uppercase())
         .unwrap_or(false);
     if pascal_case {
-        let is_known_callable = symbols_by_name.get(name).is_some_and(|sym| {
+        let is_known_callable = sym.is_some_and(|s| {
             matches!(
-                sym.kind,
+                s.kind,
                 SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
             )
         });
