@@ -103,6 +103,16 @@ pub struct FileEdgeBundle {
     pub inbound: Vec<NeighborEdge>,
 }
 
+/// One unresolved-edge match for the deletion-sanity scan. Surfaces a call
+/// site in the index that references a name that didn't resolve to any
+/// symbol — useful for spotting orphan callers of symbols removed in a PR.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnresolvedCallerHit {
+    pub unresolved_name: String,
+    pub edge_kind: EdgeKind,
+    pub caller: SymbolRecord,
+}
+
 /// Adapter-facing request that crosses the query seam. CLI marshals argv into
 /// one of these; future adapters (MCP, HTTP) build the same shape. The typed
 /// per-method API stays public for in-process Rust callers (retrieval,
@@ -135,6 +145,11 @@ pub enum QueryRequest {
         kinds: Vec<EdgeKind>,
         direction: Direction,
     },
+    UnresolvedCallers {
+        names: Vec<String>,
+        #[serde(default)]
+        kinds: Vec<EdgeKind>,
+    },
     ImportersOfFile { path: String },
     FilesAtPrefix { prefix: String },
     Metadata,
@@ -149,6 +164,7 @@ pub enum QueryResult {
     Findings(Vec<FindingRecord>),
     SymbolsInFile(Vec<SymbolRecord>),
     EdgesByFile(Vec<FileEdgeBundle>),
+    UnresolvedCallers(Vec<UnresolvedCallerHit>),
     ImportersOfFile(Vec<SymbolRecord>),
     FilesAtPrefix(Vec<FileRecordOut>),
     Metadata(MetadataRecord),
@@ -437,6 +453,9 @@ impl IndexReader {
             } => Ok(QueryResult::EdgesByFile(
                 self.edges_by_file(path, kinds, *direction)?,
             )),
+            QueryRequest::UnresolvedCallers { names, kinds } => Ok(
+                QueryResult::UnresolvedCallers(self.unresolved_callers(names, kinds)?),
+            ),
             QueryRequest::ImportersOfFile { path } => {
                 Ok(QueryResult::ImportersOfFile(self.importers_of_file(path)?))
             }
@@ -518,7 +537,7 @@ impl IndexReader {
              ORDER BY s.anchor_start_byte, e.edge_id"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let params = bind_path_and_kinds(file_path, kinds);
+        let params = bind_strings_and_kinds(&[file_path], kinds);
         let p_refs: Vec<&dyn duckdb::ToSql> =
             params.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
         let rows = stmt.query_map(p_refs.as_slice(), |r| {
@@ -572,7 +591,7 @@ impl IndexReader {
              ORDER BY s.anchor_start_byte, e.edge_id"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let params = bind_path_and_kinds(file_path, kinds);
+        let params = bind_strings_and_kinds(&[file_path], kinds);
         let p_refs: Vec<&dyn duckdb::ToSql> =
             params.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
         let rows = stmt.query_map(p_refs.as_slice(), |r| {
@@ -603,6 +622,57 @@ impl IndexReader {
         Ok(())
     }
 
+    /// Find every edge whose `dst_unresolved` matches any of the given names
+    /// (typically the short names of symbols removed in a PR). One SQL query
+    /// joins the edges table against the symbols + files tables for caller
+    /// enrichment. Empty `names` returns `[]` without querying.
+    pub fn unresolved_callers(
+        &self,
+        names: &[String],
+        kinds: &[EdgeKind],
+    ) -> Result<Vec<UnresolvedCallerHit>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let kinds: Vec<EdgeKind> = if kinds.is_empty() {
+            EdgeKind::all().to_vec()
+        } else {
+            kinds.to_vec()
+        };
+        let name_placeholders = vec!["?"; names.len()].join(",");
+        let kind_placeholders = vec!["?"; kinds.len()].join(",");
+        let sql = format!(
+            "SELECT e.dst_unresolved, e.kind, \
+                    src.symbol_id, src.file_id, sf.path, src.qualified_name, src.kind, src.signature, \
+                    src.anchor_start_byte, src.anchor_end_byte, src.anchor_start_line, src.anchor_end_line \
+             FROM edges e \
+             JOIN symbols src ON src.symbol_id = e.src_symbol_id \
+             JOIN files sf ON sf.file_id = src.file_id \
+             WHERE e.dst_symbol_id IS NULL \
+               AND e.dst_unresolved IN ({name_placeholders}) \
+               AND e.kind IN ({kind_placeholders}) \
+             ORDER BY sf.path, src.anchor_start_byte"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let params = bind_strings_and_kinds(&name_refs, &kinds);
+        let p_refs: Vec<&dyn duckdb::ToSql> =
+            params.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
+        let rows = stmt.query_map(p_refs.as_slice(), |r| {
+            Ok(UnresolvedCallerHit {
+                unresolved_name: r.get::<_, String>(0)?,
+                edge_kind: EdgeKind::from_str(&r.get::<_, String>(1)?)
+                    .unwrap_or(EdgeKind::Calls),
+                caller: read_required_symbol(r, 2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn importers_of_file(&self, file_path: &str) -> Result<Vec<SymbolRecord>> {
         let sql = format!(
             "SELECT DISTINCT src.symbol_id, src.file_id, src_f.path, src.qualified_name, src.kind, src.signature, \
@@ -626,9 +696,14 @@ impl IndexReader {
     }
 }
 
-fn bind_path_and_kinds(path: &str, kinds: &[EdgeKind]) -> Vec<Box<dyn duckdb::ToSql>> {
-    let mut p: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(kinds.len() + 1);
-    p.push(Box::new(path.to_string()));
+fn bind_strings_and_kinds(
+    leading: &[&str],
+    kinds: &[EdgeKind],
+) -> Vec<Box<dyn duckdb::ToSql>> {
+    let mut p: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(leading.len() + kinds.len());
+    for s in leading {
+        p.push(Box::new(s.to_string()));
+    }
     for k in kinds {
         p.push(Box::new(k.as_str().to_string()));
     }

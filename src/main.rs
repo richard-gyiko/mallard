@@ -105,6 +105,17 @@ enum QueryCmd {
         #[arg(long, default_value = "both")]
         direction: String,
     },
+    /// All call sites pointing at any of the given unresolved names.
+    /// Use for orphan-caller scans (e.g. after removing a public function).
+    UnresolvedCallers {
+        #[arg(long)]
+        index: PathBuf,
+        /// Comma-separated unresolved names to match.
+        #[arg(long, value_delimiter = ',')]
+        name: Vec<String>,
+        #[arg(long, default_value = "")]
+        kind: String,
+    },
     /// Symbols whose file imports the given file path.
     ImportersOf {
         path: String,
@@ -246,6 +257,13 @@ fn to_request(cmd: QueryCmd) -> anyhow::Result<(std::path::PathBuf, QueryRequest
                 path,
                 kinds: parse_kinds(&kind)?,
                 direction: Direction::from_str(&direction)?,
+            },
+        ),
+        QueryCmd::UnresolvedCallers { index, name, kind } => (
+            index,
+            QueryRequest::UnresolvedCallers {
+                names: name,
+                kinds: parse_kinds(&kind)?,
             },
         ),
         QueryCmd::ImportersOf { path, index } => (index, QueryRequest::ImportersOfFile { path }),

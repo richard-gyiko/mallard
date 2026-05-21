@@ -123,6 +123,26 @@ A symbol with `modified-body` status has a changed implementation. The added/rem
 
 If both stage 3 and stage 4 produce empty sets, stop and emit "diff touches no parseable structural changes" summary.
 
+### 4.5 Deletion sanity (orphan-caller scan)
+
+Run only when stage 3 produced any `removed` symbols. For each removed function/method, ask the head index for **any** call site with an `dst_unresolved` matching the removed short name. A hit is an orphan caller — a site that wasn't migrated to whatever replacement the PR introduced.
+
+The dangerous case is a caller in an *unchanged* file the PR author forgot to update. `unresolved-callers` does the scan in one SQL query against the edges table — orders of magnitude faster than looping `edges-by-file` over every file in the head index.
+
+```bash
+# Extract short names of removed symbols.
+removed_short=$(awk '$1 == "removed" {print $3}' stage3.txt \
+                | awk -F'::' '{print $NF}' | sort -u | paste -sd, -)
+
+"$MALLARD" query unresolved-callers --name "$removed_short" --kind calls --index head.duckdb \
+  | jq -r '.value[] | "\(.unresolved_name) ← \(.caller.qualified_name) @ \(.caller.path):\(.caller.anchor.start_line)"' \
+  > orphan_callers.txt
+```
+
+If `orphan_callers.txt` is non-empty, every line becomes a **high-confidence** synthesis comment (call site referencing a removed name = definite-broken). Cite the removed symbol's old ID (from base index) + the orphan caller's symbol ID (from head).
+
+PowerShell equivalent in [`references/powershell-recipes.md`](references/powershell-recipes.md).
+
 ### 5. Gather evidence per changed symbol
 
 For each `(kind, file, id)` in the changed set (added, modified-signature, modified-body — all the same evidence shape; removed get base-side evidence instead):

@@ -116,6 +116,14 @@ mallard query edges-by-file src/query.rs --kind calls --direction both --index "
 
 One SQL query per active direction, collapsing the N+1 pattern of looping `neighbors` over `symbols-in-file`. Use for per-file blast-radius analysis and PR-review stage-4 edge diff.
 
+### `unresolved-callers --name n1,n2,... --kind k1,k2`
+
+All call sites pointing at any of the given unresolved names. One SQL query against the edges table. Use for orphan-caller scans (e.g. after removing a public function — every site that didn't migrate to the replacement shows up here).
+
+```bash
+mallard query unresolved-callers --name format,unwrap --kind calls --index "$INDEX"
+```
+
 ### `files [--prefix <p>]`
 
 File records (path, language, size, status). Empty prefix = all files.

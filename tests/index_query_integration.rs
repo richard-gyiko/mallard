@@ -293,6 +293,36 @@ fn edges_by_file_preserves_symbols_with_zero_edges() {
 }
 
 #[test]
+fn unresolved_callers_unknown_name_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    // Fixture is small and self-contained; the post-build resolver picks
+    // up every cross-file call. A name that nothing references must
+    // return no hits.
+    let hits = open_reader(&out)
+        .unresolved_callers(
+            &["definitely_not_a_real_symbol_xyz".to_string()],
+            &[EdgeKind::Calls],
+        )
+        .unwrap();
+    assert!(hits.is_empty(), "got {hits:?}");
+}
+
+#[test]
+fn unresolved_callers_empty_names_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let hits = open_reader(&out)
+        .unresolved_callers(&[], &[])
+        .unwrap();
+    assert!(hits.is_empty());
+}
+
+#[test]
 fn edges_by_file_empty_file_path_returns_empty() {
     let tmp = TempDir::new().unwrap();
     let out = tmp.path().join("index.duckdb");

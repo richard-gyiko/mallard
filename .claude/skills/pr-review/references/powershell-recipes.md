@@ -63,6 +63,22 @@ foreach ($f in $CHANGED) {
 
 Verified on PR #7 (4 files, ~60 stable symbols): **8.1 seconds wall clock** with the new primitive vs ~5 minutes with the per-symbol `neighbors` approach.
 
+## Stage 4.5: deletion sanity (orphan-caller scan)
+
+Run only when stage 3 found `removed` symbols. One SQL via `unresolved-callers` — orders of magnitude faster than looping `edges-by-file` over every head file.
+
+```powershell
+$removedShort = $removedRows | ForEach-Object { ($_.sym.qualified_name -split '::')[-1] } | Sort-Object -Unique
+$nameList = $removedShort -join ','
+$hits = (& $M query unresolved-callers --name $nameList --kind calls --index head.duckdb 2>$null | ConvertFrom-Json).value
+"orphan callers: $($hits.Count)"
+$hits | ForEach-Object { "$($_.unresolved_name) <- $($_.caller.qualified_name) @ $($_.caller.path):$($_.caller.anchor.start_line)" }
+```
+
+Every hit becomes a high-confidence synthesis comment (call site referencing a removed name = definite-broken).
+
+Verified on PR #7's 9 removed free fns against the 74-file head index: **1.6 seconds** with `unresolved-callers` vs ~58 seconds when scanning via per-file `edges-by-file`.
+
 ## Stage 5: gather evidence
 
 ```powershell
