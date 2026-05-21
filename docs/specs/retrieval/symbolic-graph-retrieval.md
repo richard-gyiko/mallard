@@ -1,5 +1,7 @@
 # Symbolic graph retrieval
 
+> **Status: deferred.** Per [ADR-0007](../../decisions/0007-defer-retrieval-module-agents-compose-primitives.md), v0 retrieval is delivered by agents composing `mallard query` primitives via an Agent Skill rather than by a dedicated built module. This spec remains as the eventual shape if a future in-process Rust consumer needs the same capabilities behind a single function. [ADR-0004](../../decisions/0004-symbolic-graph-retrieval-over-embeddings-first.md) (symbolic-first over embeddings-first) still stands.
+
 ## Purpose
 
 Resolve a query into a ranked, bounded subgraph of repository context that an LLM (or any other consumer) can reason over. Retrieval composes index-query primitives into structural neighborhoods that are useful for downstream tasks like PR review. Embeddings are a secondary mechanism, used only when symbolic anchors are absent.
