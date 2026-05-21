@@ -1,0 +1,209 @@
+use std::path::{Path, PathBuf};
+
+use duckdb::{Connection, params};
+
+use crate::core::{
+    Anchor, Edge, FileId, FileRecord, Finding, Metadata, MallardError, ParseError, ParsedFile,
+    Result, Symbol,
+};
+use crate::schema::{self, cols, metadata_keys, tables};
+
+pub struct IndexWriter {
+    conn: Connection,
+    final_path: PathBuf,
+    tmp_path: PathBuf,
+}
+
+impl IndexWriter {
+    pub fn create(final_path: &Path, meta: &Metadata) -> Result<Self> {
+        if let Some(parent) = final_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let tmp_path = tmp_path_for(final_path);
+        match std::fs::remove_file(&tmp_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let conn = Connection::open(&tmp_path)?;
+        conn.execute_batch(schema::DDL)?;
+        seed_metadata(&conn, meta)?;
+        Ok(IndexWriter {
+            conn,
+            final_path: final_path.to_path_buf(),
+            tmp_path,
+        })
+    }
+
+    pub fn write_indexed(
+        &mut self,
+        file: &FileRecord,
+        parsed: &ParsedFile,
+        findings: &[Finding],
+    ) -> Result<()> {
+        self.append_file(file)?;
+        self.append_symbols(parsed.file_id, &parsed.symbols)?;
+        self.append_edges(&parsed.edges)?;
+        self.append_findings(findings)?;
+        self.append_parse_errors(&parsed.parse_errors)?;
+        Ok(())
+    }
+
+    pub fn write_skipped(&mut self, file: &FileRecord) -> Result<()> {
+        self.append_file(file)
+    }
+
+    fn append_file(&mut self, file: &FileRecord) -> Result<()> {
+        let mut app = self.conn.appender(tables::FILES)?;
+        app.append_row(params![
+            file.id,
+            file.path.as_str(),
+            file.language.as_deref(),
+            file.size_bytes as i64,
+            file.status.as_str(),
+        ])?;
+        app.flush()?;
+        Ok(())
+    }
+
+    fn append_symbols(&mut self, file_id: FileId, syms: &[Symbol]) -> Result<()> {
+        if syms.is_empty() {
+            return Ok(());
+        }
+        let mut app = self.conn.appender(tables::SYMBOLS)?;
+        for sym in syms {
+            let a: Anchor = sym.anchor;
+            app.append_row(params![
+                sym.id.as_str(),
+                file_id,
+                sym.qualified_name.as_str(),
+                sym.kind.as_str(),
+                sym.signature.as_str(),
+                a.start_byte as i64,
+                a.end_byte as i64,
+                a.start_line as i32,
+                a.end_line as i32,
+            ])?;
+        }
+        app.flush()?;
+        Ok(())
+    }
+
+    fn append_edges(&mut self, edges: &[Edge]) -> Result<()> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let mut app = self.conn.appender_with_columns(
+            tables::EDGES,
+            &[
+                cols::edges::SRC_SYMBOL_ID,
+                cols::edges::DST_SYMBOL_ID,
+                cols::edges::DST_UNRESOLVED,
+                cols::edges::KIND,
+                cols::edges::FILE_ID,
+            ],
+        )?;
+        for edge in edges {
+            app.append_row(params![
+                edge.src.as_str(),
+                edge.dst.as_ref().map(|d| d.as_str()),
+                edge.dst_unresolved.as_deref(),
+                edge.kind.as_str(),
+                edge.file_id,
+            ])?;
+        }
+        app.flush()?;
+        Ok(())
+    }
+
+    fn append_findings(&mut self, findings: &[Finding]) -> Result<()> {
+        if findings.is_empty() {
+            return Ok(());
+        }
+        let mut app = self.conn.appender_with_columns(
+            tables::FINDINGS,
+            &[
+                cols::findings::RULE_ID,
+                cols::findings::FILE_ID,
+                cols::findings::START_LINE,
+                cols::findings::END_LINE,
+                cols::findings::MESSAGE,
+            ],
+        )?;
+        for f in findings {
+            app.append_row(params![
+                f.rule_id.as_str(),
+                f.file_id,
+                f.start_line as i32,
+                f.end_line as i32,
+                f.message.as_str(),
+            ])?;
+        }
+        app.flush()?;
+        Ok(())
+    }
+
+    fn append_parse_errors(&mut self, errs: &[ParseError]) -> Result<()> {
+        if errs.is_empty() {
+            return Ok(());
+        }
+        let mut app = self.conn.appender(tables::PARSE_ERRORS)?;
+        for err in errs {
+            app.append_row(params![
+                err.file_id,
+                err.message.as_str(),
+                err.line as i32,
+                err.col as i32,
+            ])?;
+        }
+        app.flush()?;
+        Ok(())
+    }
+
+    pub fn finalize(self) -> Result<()> {
+        self.conn.close().map_err(|(_, e)| MallardError::DuckDb(e))?;
+        match std::fs::remove_file(&self.final_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        std::fs::rename(&self.tmp_path, &self.final_path)?;
+        Ok(())
+    }
+}
+
+fn tmp_path_for(final_path: &Path) -> PathBuf {
+    let mut s = final_path.as_os_str().to_owned();
+    s.push(".tmp");
+    PathBuf::from(s)
+}
+
+fn seed_metadata(conn: &Connection, meta: &Metadata) -> Result<()> {
+    let sql = format!(
+        "INSERT INTO {} ({}, {}) VALUES (?, ?)",
+        tables::METADATA,
+        cols::metadata::KEY,
+        cols::metadata::VALUE,
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.execute(params![metadata_keys::SHA, meta.sha.as_str()])?;
+    stmt.execute(params![
+        metadata_keys::INDEXER_VERSION,
+        meta.indexer_version.as_str()
+    ])?;
+    if let Some(h) = &meta.rule_set_hash {
+        stmt.execute(params![metadata_keys::RULE_SET_HASH, h.as_str()])?;
+    }
+    stmt.execute(params![metadata_keys::BUILT_AT, meta.built_at.as_str()])?;
+    stmt.execute(params![
+        metadata_keys::LANGUAGE_ALLOW_LIST,
+        meta.language_allow_list.join(",").as_str()
+    ])?;
+    stmt.execute(params![
+        metadata_keys::INDEX_FORMAT_VERSION,
+        schema::INDEX_FORMAT_VERSION.to_string().as_str()
+    ])?;
+    Ok(())
+}
