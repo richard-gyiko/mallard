@@ -13,7 +13,6 @@ const EDGE_KINDS_FOR_COUNTERS: &[EdgeKind] = &[
     EdgeKind::Calls,
     EdgeKind::Imports,
     EdgeKind::Contains,
-    EdgeKind::References,
 ];
 
 pub fn build(req: BuildRequest) -> Result<BuildSummary> {

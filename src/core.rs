@@ -42,7 +42,6 @@ pub enum SymbolKind {
     Enum,
     Trait,
     Module,
-    Impl,
     Const,
     Static,
     Macro,
@@ -61,7 +60,6 @@ impl SymbolKind {
             SymbolKind::Enum => "enum",
             SymbolKind::Trait => "trait",
             SymbolKind::Module => "module",
-            SymbolKind::Impl => "impl",
             SymbolKind::Const => "const",
             SymbolKind::Static => "static",
             SymbolKind::Macro => "macro",
@@ -83,7 +81,6 @@ impl FromStr for SymbolKind {
             "enum" => SymbolKind::Enum,
             "trait" => SymbolKind::Trait,
             "module" => SymbolKind::Module,
-            "impl" => SymbolKind::Impl,
             "const" => SymbolKind::Const,
             "static" => SymbolKind::Static,
             "macro" => SymbolKind::Macro,
@@ -101,7 +98,6 @@ impl FromStr for SymbolKind {
 pub enum EdgeKind {
     Calls,
     Imports,
-    References,
     Contains,
     TestsFor,
     TestedBy,
@@ -112,7 +108,6 @@ impl EdgeKind {
         match self {
             EdgeKind::Calls => "calls",
             EdgeKind::Imports => "imports",
-            EdgeKind::References => "references",
             EdgeKind::Contains => "contains",
             EdgeKind::TestsFor => "tests_for",
             EdgeKind::TestedBy => "tested_by",
@@ -123,7 +118,6 @@ impl EdgeKind {
         &[
             EdgeKind::Calls,
             EdgeKind::Imports,
-            EdgeKind::References,
             EdgeKind::Contains,
             EdgeKind::TestsFor,
             EdgeKind::TestedBy,
@@ -137,7 +131,6 @@ impl FromStr for EdgeKind {
         Ok(match s {
             "calls" => EdgeKind::Calls,
             "imports" => EdgeKind::Imports,
-            "references" => EdgeKind::References,
             "contains" => EdgeKind::Contains,
             "tests_for" => EdgeKind::TestsFor,
             "tested_by" => EdgeKind::TestedBy,
