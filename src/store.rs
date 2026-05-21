@@ -72,8 +72,19 @@ impl IndexWriter {
         if syms.is_empty() {
             return Ok(());
         }
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut app = self.conn.appender(tables::SYMBOLS)?;
         for sym in syms {
+            if !seen.insert(sym.id.as_str()) {
+                tracing::warn!(
+                    symbol_id = sym.id.as_str(),
+                    qualified_name = sym.qualified_name.as_str(),
+                    kind = sym.kind.as_str(),
+                    file_id,
+                    "dropping duplicate symbol id within file"
+                );
+                continue;
+            }
             let a: Anchor = sym.anchor;
             app.append_row(params![
                 sym.id.as_str(),

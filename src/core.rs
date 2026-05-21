@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +73,29 @@ impl SymbolKind {
     }
 }
 
+impl FromStr for SymbolKind {
+    type Err = MallardError;
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "function" => SymbolKind::Function,
+            "method" => SymbolKind::Method,
+            "struct" => SymbolKind::Struct,
+            "enum" => SymbolKind::Enum,
+            "trait" => SymbolKind::Trait,
+            "module" => SymbolKind::Module,
+            "impl" => SymbolKind::Impl,
+            "const" => SymbolKind::Const,
+            "static" => SymbolKind::Static,
+            "macro" => SymbolKind::Macro,
+            "type_alias" => SymbolKind::TypeAlias,
+            "field" => SymbolKind::Field,
+            "variant" => SymbolKind::Variant,
+            "other" => SymbolKind::Other,
+            _ => return Err(MallardError::MalformedRow(format!("unknown symbol kind {s:?}"))),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
@@ -93,6 +117,32 @@ impl EdgeKind {
             EdgeKind::TestsFor => "tests_for",
             EdgeKind::TestedBy => "tested_by",
         }
+    }
+
+    pub fn all() -> &'static [EdgeKind] {
+        &[
+            EdgeKind::Calls,
+            EdgeKind::Imports,
+            EdgeKind::References,
+            EdgeKind::Contains,
+            EdgeKind::TestsFor,
+            EdgeKind::TestedBy,
+        ]
+    }
+}
+
+impl FromStr for EdgeKind {
+    type Err = MallardError;
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "calls" => EdgeKind::Calls,
+            "imports" => EdgeKind::Imports,
+            "references" => EdgeKind::References,
+            "contains" => EdgeKind::Contains,
+            "tests_for" => EdgeKind::TestsFor,
+            "tested_by" => EdgeKind::TestedBy,
+            _ => return Err(MallardError::MalformedRow(format!("unknown edge kind {s:?}"))),
+        })
     }
 }
 
@@ -162,6 +212,21 @@ impl FileStatus {
             FileStatus::SkippedSymlink => "skipped:symlink",
             FileStatus::SkippedExtension => "skipped:extension",
         }
+    }
+}
+
+impl FromStr for FileStatus {
+    type Err = MallardError;
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "indexed" => FileStatus::Indexed,
+            "unparseable" => FileStatus::Unparseable,
+            "skipped:size" => FileStatus::SkippedSize,
+            "skipped:binary" => FileStatus::SkippedBinary,
+            "skipped:symlink" => FileStatus::SkippedSymlink,
+            "skipped:extension" => FileStatus::SkippedExtension,
+            _ => return Err(MallardError::MalformedRow(format!("unknown file status {s:?}"))),
+        })
     }
 }
 
@@ -289,6 +354,12 @@ pub enum MallardError {
     Json(#[from] serde_json::Error),
     #[error("invalid path: {0}")]
     InvalidPath(String),
+    #[error("index not found: {0}")]
+    IndexNotFound(PathBuf),
+    #[error("index format version mismatch: found {found}, expected {expected}")]
+    VersionMismatch { found: u32, expected: u32 },
+    #[error("malformed row: {0}")]
+    MalformedRow(String),
     #[error("{0}")]
     Other(String),
 }

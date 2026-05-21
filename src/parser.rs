@@ -198,8 +198,10 @@ fn build_symbol_match<'tree>(
     if m.captures.len() < 2 {
         return None;
     }
-    let name_node = m.captures[0].node;
-    let def_node = m.captures[1].node;
+    let (name_node, def_node) = pick_name_and_def(m)?;
+    if matches!(kind, SymbolKind::TypeAlias) && is_method(def_node) {
+        return None;
+    }
     let name = node_text(name_node, source);
     let qualified_name = compute_qualified_name(def_node, &name, kind, source);
     let signature = compute_signature(def_node, source, kind);
@@ -222,6 +224,28 @@ fn build_symbol_match<'tree>(
     })
 }
 
+fn pick_name_and_def<'tree>(
+    m: &tree_sitter::QueryMatch<'_, 'tree>,
+) -> Option<(Node<'tree>, Node<'tree>)> {
+    let mut smallest: Option<Node> = None;
+    let mut largest: Option<Node> = None;
+    for c in m.captures {
+        let n = c.node;
+        let span = n.end_byte().saturating_sub(n.start_byte());
+        match smallest {
+            None => smallest = Some(n),
+            Some(s) if span < s.end_byte().saturating_sub(s.start_byte()) => smallest = Some(n),
+            _ => {}
+        }
+        match largest {
+            None => largest = Some(n),
+            Some(l) if span > l.end_byte().saturating_sub(l.start_byte()) => largest = Some(n),
+            _ => {}
+        }
+    }
+    Some((smallest?, largest?))
+}
+
 fn ref_call_match<'tree>(
     m: &tree_sitter::QueryMatch<'_, 'tree>,
     source: &[u8],
@@ -239,7 +263,27 @@ fn compute_qualified_name(def_node: Node, name: &str, kind: SymbolKind, source: 
             return format!("{impl_type}::{name}");
         }
     }
-    name.to_string()
+    let modules = enclosing_module_path(def_node, source);
+    if modules.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}::{name}", modules.join("::"))
+    }
+}
+
+fn enclosing_module_path(def_node: Node, source: &[u8]) -> Vec<String> {
+    let mut path: Vec<String> = Vec::new();
+    let mut cur = def_node.parent();
+    while let Some(p) = cur {
+        if p.kind() == "mod_item" {
+            if let Some(name_node) = p.child_by_field_name("name") {
+                path.push(node_text(name_node, source));
+            }
+        }
+        cur = p.parent();
+    }
+    path.reverse();
+    path
 }
 
 fn compute_signature(def_node: Node, source: &[u8], kind: SymbolKind) -> String {
