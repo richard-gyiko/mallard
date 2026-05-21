@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use duckdb::Connection;
 use mallard::{
-    BuildRequest, Direction, EdgeKind, FindingFilter, IndexReader, MallardError, SymbolId, build,
+    BuildRequest, Direction, EdgeKind, FindingFilter, IndexReader, MallardError, QueryRequest,
+    QueryResult, SymbolId, build,
 };
 use tempfile::TempDir;
 
@@ -218,6 +219,52 @@ fn missing_index_file_errors() {
     let bogus = PathBuf::from("./does-not-exist.duckdb");
     let err = IndexReader::open(&bogus).err().expect("should error");
     assert!(matches!(err, MallardError::IndexNotFound(_)), "got: {err}");
+}
+
+#[test]
+fn run_dispatches_query_request_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let json = r#"{"kind":"metadata"}"#;
+    let request: QueryRequest = serde_json::from_str(json).unwrap();
+    let result = open_reader(&out).run(&request).unwrap();
+    match result {
+        QueryResult::Metadata(m) => assert_eq!(m.sha.as_deref(), Some("deadbeefcafe")),
+        other => panic!("expected Metadata result, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_dispatches_lookup_and_expand() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let bump = find_symbol(&out, "lib.rs", "Counter::bump");
+    let reader = open_reader(&out);
+
+    let lookup = reader
+        .run(&QueryRequest::LookupSymbol { id: bump.clone() })
+        .unwrap();
+    match lookup {
+        QueryResult::LookupSymbol(Some(sym)) => assert_eq!(sym.qualified_name, "Counter::bump"),
+        other => panic!("expected Some symbol, got {other:?}"),
+    }
+
+    let expand = reader
+        .run(&QueryRequest::Expand {
+            id: bump,
+            depth: 1,
+            kinds: vec![EdgeKind::Calls],
+            direction: Direction::Out,
+        })
+        .unwrap();
+    match expand {
+        QueryResult::Expand(g) => assert!(g.nodes.len() >= 2),
+        other => panic!("expected Expand result, got {other:?}"),
+    }
 }
 
 #[test]
