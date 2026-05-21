@@ -17,6 +17,6 @@ pub use crate::core::{
 pub use crate::file_processor::FileProcessor;
 pub use crate::index::build;
 pub use crate::query::{
-    Direction, FileRecordOut, FindingFilter, FindingRecord, MetadataRecord, NeighborEdge,
-    Subgraph, SymbolRecord,
+    Direction, FileRecordOut, FindingFilter, FindingRecord, IndexReader, MetadataRecord,
+    NeighborEdge, Subgraph, SymbolRecord,
 };

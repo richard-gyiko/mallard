@@ -92,13 +92,286 @@ pub struct MetadataRecord {
     pub index_format_version: u32,
 }
 
-// `Connection::open` creates the file when missing, so a pre-check is the only
-// way to distinguish "absent index" from "empty index" cleanly.
-fn open_read(path: &Path) -> Result<Connection> {
-    if !path.exists() {
-        return Err(MallardError::IndexNotFound(path.to_path_buf()));
+/// Verified handle to a built Index. `open` checks `index_format_version` once;
+/// every method on `&self` reads from the same opened DuckDB connection.
+pub struct IndexReader {
+    conn: Connection,
+}
+
+impl IndexReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        // `Connection::open` creates the file when missing, so a pre-check is the
+        // only way to distinguish "absent index" from "empty index" cleanly.
+        if !path.exists() {
+            return Err(MallardError::IndexNotFound(path.to_path_buf()));
+        }
+        let conn = Connection::open(path)?;
+        verify_format_version(&conn)?;
+        Ok(IndexReader { conn })
     }
-    let conn = Connection::open(path)?;
+
+    pub fn metadata(&self) -> Result<MetadataRecord> {
+        let sql = format!(
+            "SELECT {k}, {v} FROM {t}",
+            k = cols::metadata::KEY,
+            v = cols::metadata::VALUE,
+            t = tables::METADATA,
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = MetadataRecord {
+            sha: None,
+            indexer_version: None,
+            rule_set_hash: None,
+            built_at: None,
+            language_allow_list: Vec::new(),
+            index_format_version: schema::INDEX_FORMAT_VERSION,
+        };
+        for row in rows {
+            let (k, v) = row?;
+            match k.as_str() {
+                metadata_keys::SHA => out.sha = Some(v),
+                metadata_keys::INDEXER_VERSION => out.indexer_version = Some(v),
+                metadata_keys::RULE_SET_HASH => out.rule_set_hash = Some(v),
+                metadata_keys::BUILT_AT => out.built_at = Some(v),
+                metadata_keys::LANGUAGE_ALLOW_LIST => {
+                    out.language_allow_list = if v.is_empty() {
+                        Vec::new()
+                    } else {
+                        v.split(',').map(str::to_string).collect()
+                    };
+                }
+                metadata_keys::INDEX_FORMAT_VERSION => {
+                    out.index_format_version = v.parse().unwrap_or(schema::INDEX_FORMAT_VERSION);
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn lookup_symbol(&self, id: &SymbolId) -> Result<Option<SymbolRecord>> {
+        fetch_symbol(&self.conn, id)
+    }
+
+    pub fn symbols_in_file(&self, file_path: &str) -> Result<Vec<SymbolRecord>> {
+        let sql = format!("{SYMBOL_SELECT} WHERE f.path = ? ORDER BY s.anchor_start_byte");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![file_path], map_symbol_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn files_at_prefix(&self, prefix: &str) -> Result<Vec<FileRecordOut>> {
+        let sql = format!(
+            "SELECT {fid}, {p}, {l}, {sz}, {st} FROM {t} WHERE {p} LIKE ? ESCAPE '\\' ORDER BY {p}",
+            fid = cols::files::FILE_ID,
+            p = cols::files::PATH,
+            l = cols::files::LANGUAGE,
+            sz = cols::files::SIZE_BYTES,
+            st = cols::files::STATUS,
+            t = tables::FILES,
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![like_escape(prefix)], |r| {
+            let status_str: String = r.get(4)?;
+            Ok(FileRecordOut {
+                file_id: r.get(0)?,
+                path: r.get(1)?,
+                language: r.get::<_, Option<String>>(2)?,
+                size_bytes: r.get::<_, i64>(3)? as u64,
+                status: FileStatus::from_str(&status_str).unwrap_or(FileStatus::Indexed),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn neighbors(
+        &self,
+        id: &SymbolId,
+        kinds: &[EdgeKind],
+        dir: Direction,
+    ) -> Result<Vec<NeighborEdge>> {
+        let kinds: Vec<EdgeKind> = if kinds.is_empty() {
+            EdgeKind::all().to_vec()
+        } else {
+            kinds.to_vec()
+        };
+        neighbors_inner(
+            &self.conn,
+            id,
+            &kinds,
+            matches!(dir, Direction::Out | Direction::Both),
+            matches!(dir, Direction::In | Direction::Both),
+        )
+    }
+
+    pub fn expand(
+        &self,
+        id: &SymbolId,
+        depth: u32,
+        kinds: &[EdgeKind],
+        dir: Direction,
+    ) -> Result<Subgraph> {
+        let anchor = match fetch_symbol(&self.conn, id)? {
+            Some(s) => s,
+            None => {
+                return Ok(Subgraph {
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                    max_depth_reached: 0,
+                });
+            }
+        };
+
+        if depth == 0 {
+            return Ok(Subgraph {
+                nodes: vec![anchor],
+                edges: Vec::new(),
+                max_depth_reached: 0,
+            });
+        }
+
+        let kinds_owned: Vec<EdgeKind> = if kinds.is_empty() {
+            EdgeKind::all().to_vec()
+        } else {
+            kinds.to_vec()
+        };
+        let want_out = matches!(dir, Direction::Out | Direction::Both);
+        let want_in = matches!(dir, Direction::In | Direction::Both);
+
+        let mut visited_nodes: std::collections::BTreeMap<String, SymbolRecord> =
+            std::collections::BTreeMap::new();
+        visited_nodes.insert(anchor.id.0.clone(), anchor.clone());
+        let mut all_edges: Vec<NeighborEdge> = Vec::new();
+        let mut frontier: Vec<SymbolId> = vec![anchor.id.clone()];
+        let mut reached: u32 = 0;
+
+        for d in 1..=depth {
+            if frontier.is_empty() {
+                break;
+            }
+            let mut next: Vec<SymbolId> = Vec::new();
+            for source_id in &frontier {
+                let edges = neighbors_inner(&self.conn, source_id, &kinds_owned, want_out, want_in)?;
+                for e in edges {
+                    if let Some(dst) = &e.dst {
+                        if !visited_nodes.contains_key(&dst.id.0) {
+                            visited_nodes.insert(dst.id.0.clone(), dst.clone());
+                            next.push(dst.id.clone());
+                        }
+                    }
+                    if !visited_nodes.contains_key(&e.src.id.0) {
+                        visited_nodes.insert(e.src.id.0.clone(), e.src.clone());
+                    }
+                    all_edges.push(e);
+                }
+            }
+            if !next.is_empty() {
+                reached = d;
+            }
+            frontier = next;
+        }
+
+        let nodes: Vec<SymbolRecord> = visited_nodes.into_values().collect();
+        Ok(Subgraph {
+            nodes,
+            edges: all_edges,
+            max_depth_reached: reached,
+        })
+    }
+
+    pub fn findings(&self, filter: FindingFilter) -> Result<Vec<FindingRecord>> {
+        let mut symbol_anchor: Option<(FileId, u32, u32)> = None;
+        if let Some(sid) = &filter.symbol_id {
+            match fetch_symbol(&self.conn, sid)? {
+                Some(s) => {
+                    symbol_anchor = Some((s.file_id, s.anchor.start_line, s.anchor.end_line));
+                }
+                None => return Ok(Vec::new()),
+            }
+        }
+
+        let mut where_parts: Vec<String> = Vec::new();
+        let mut bound: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+        if let Some(rule) = &filter.rule_id {
+            where_parts.push("fnd.rule_id = ?".to_string());
+            bound.push(Box::new(rule.clone()));
+        }
+        if let Some(prefix) = &filter.path_prefix {
+            where_parts.push("f.path LIKE ? ESCAPE '\\'".to_string());
+            bound.push(Box::new(like_escape(prefix)));
+        }
+        if let Some((fid, start, end)) = symbol_anchor {
+            where_parts
+                .push("fnd.file_id = ? AND fnd.end_line >= ? AND fnd.start_line <= ?".to_string());
+            bound.push(Box::new(fid));
+            bound.push(Box::new(start as i32));
+            bound.push(Box::new(end as i32));
+        }
+
+        let where_clause = if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", where_parts.join(" AND "))
+        };
+        let sql = format!(
+            "SELECT fnd.rule_id, fnd.file_id, f.path, fnd.start_line, fnd.end_line, fnd.message \
+             FROM findings fnd JOIN files f ON f.file_id = fnd.file_id{where_clause} \
+             ORDER BY f.path, fnd.start_line, fnd.rule_id"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let p_refs: Vec<&dyn duckdb::ToSql> =
+            bound.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
+        let rows = stmt.query_map(p_refs.as_slice(), |r| {
+            Ok(FindingRecord {
+                rule_id: r.get(0)?,
+                file_id: r.get(1)?,
+                path: r.get(2)?,
+                start_line: r.get::<_, i32>(3)? as u32,
+                end_line: r.get::<_, i32>(4)? as u32,
+                message: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn importers_of_file(&self, file_path: &str) -> Result<Vec<SymbolRecord>> {
+        let sql = format!(
+            "SELECT DISTINCT src.symbol_id, src.file_id, src_f.path, src.qualified_name, src.kind, src.signature, \
+                    src.anchor_start_byte, src.anchor_end_byte, src.anchor_start_line, src.anchor_end_line \
+             FROM edges e \
+             JOIN symbols src ON src.symbol_id = e.src_symbol_id \
+             JOIN files src_f ON src_f.file_id = src.file_id \
+             JOIN symbols dst ON dst.symbol_id = e.dst_symbol_id \
+             JOIN files dst_f ON dst_f.file_id = dst.file_id \
+             WHERE e.kind = ? AND dst_f.path = ? \
+             ORDER BY src_f.path, src.anchor_start_byte"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows =
+            stmt.query_map(params![EdgeKind::Imports.as_str(), file_path], map_symbol_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+}
+
+fn verify_format_version(conn: &Connection) -> Result<()> {
     let sql = format!(
         "SELECT {v} FROM {t} WHERE {k} = ?",
         v = cols::metadata::VALUE,
@@ -126,7 +399,7 @@ fn open_read(path: &Path) -> Result<Connection> {
             expected: schema::INDEX_FORMAT_VERSION,
         });
     }
-    Ok(conn)
+    Ok(())
 }
 
 const SYMBOL_SELECT: &str = "\
@@ -156,121 +429,6 @@ fn like_escape(prefix: &str) -> String {
     format!("{}%", prefix.replace('%', "\\%").replace('_', "\\_"))
 }
 
-pub fn metadata(index: &Path) -> Result<MetadataRecord> {
-    let conn = open_read(index)?;
-    let sql = format!(
-        "SELECT {k}, {v} FROM {t}",
-        k = cols::metadata::KEY,
-        v = cols::metadata::VALUE,
-        t = tables::METADATA,
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-    let mut out = MetadataRecord {
-        sha: None,
-        indexer_version: None,
-        rule_set_hash: None,
-        built_at: None,
-        language_allow_list: Vec::new(),
-        index_format_version: schema::INDEX_FORMAT_VERSION,
-    };
-    for row in rows {
-        let (k, v) = row?;
-        match k.as_str() {
-            metadata_keys::SHA => out.sha = Some(v),
-            metadata_keys::INDEXER_VERSION => out.indexer_version = Some(v),
-            metadata_keys::RULE_SET_HASH => out.rule_set_hash = Some(v),
-            metadata_keys::BUILT_AT => out.built_at = Some(v),
-            metadata_keys::LANGUAGE_ALLOW_LIST => {
-                out.language_allow_list = if v.is_empty() {
-                    Vec::new()
-                } else {
-                    v.split(',').map(str::to_string).collect()
-                };
-            }
-            metadata_keys::INDEX_FORMAT_VERSION => {
-                out.index_format_version = v.parse().unwrap_or(schema::INDEX_FORMAT_VERSION);
-            }
-            _ => {}
-        }
-    }
-    Ok(out)
-}
-
-pub fn lookup_symbol(index: &Path, id: &SymbolId) -> Result<Option<SymbolRecord>> {
-    let conn = open_read(index)?;
-    let sql = format!("{SYMBOL_SELECT} WHERE s.symbol_id = ?");
-    let mut stmt = conn.prepare(&sql)?;
-    let row = stmt
-        .query_row(params![id.as_str()], map_symbol_row)
-        .optional()?;
-    Ok(row)
-}
-
-pub fn symbols_in_file(index: &Path, file_path: &str) -> Result<Vec<SymbolRecord>> {
-    let conn = open_read(index)?;
-    let sql = format!(
-        "{SYMBOL_SELECT} WHERE f.path = ? ORDER BY s.anchor_start_byte"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![file_path], map_symbol_row)?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
-}
-
-pub fn files_at_prefix(index: &Path, prefix: &str) -> Result<Vec<FileRecordOut>> {
-    let conn = open_read(index)?;
-    let sql = format!(
-        "SELECT {fid}, {p}, {l}, {sz}, {st} FROM {t} WHERE {p} LIKE ? ESCAPE '\\' ORDER BY {p}",
-        fid = cols::files::FILE_ID,
-        p = cols::files::PATH,
-        l = cols::files::LANGUAGE,
-        sz = cols::files::SIZE_BYTES,
-        st = cols::files::STATUS,
-        t = tables::FILES,
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![like_escape(prefix)], |r| {
-        let status_str: String = r.get(4)?;
-        Ok(FileRecordOut {
-            file_id: r.get(0)?,
-            path: r.get(1)?,
-            language: r.get::<_, Option<String>>(2)?,
-            size_bytes: r.get::<_, i64>(3)? as u64,
-            status: FileStatus::from_str(&status_str).unwrap_or(FileStatus::Indexed),
-        })
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
-}
-
-pub fn neighbors(
-    index: &Path,
-    id: &SymbolId,
-    kinds: &[EdgeKind],
-    dir: Direction,
-) -> Result<Vec<NeighborEdge>> {
-    let conn = open_read(index)?;
-    let kinds: Vec<EdgeKind> = if kinds.is_empty() {
-        EdgeKind::all().to_vec()
-    } else {
-        kinds.to_vec()
-    };
-    neighbors_inner(
-        &conn,
-        id,
-        &kinds,
-        matches!(dir, Direction::Out | Direction::Both),
-        matches!(dir, Direction::In | Direction::Both),
-    )
-}
-
 fn fetch_symbol(conn: &Connection, id: &SymbolId) -> Result<Option<SymbolRecord>> {
     let sql = format!("{SYMBOL_SELECT} WHERE s.symbol_id = ?");
     let mut stmt = conn.prepare(&sql)?;
@@ -278,83 +436,6 @@ fn fetch_symbol(conn: &Connection, id: &SymbolId) -> Result<Option<SymbolRecord>
         .query_row(params![id.as_str()], map_symbol_row)
         .optional()?;
     Ok(row)
-}
-
-pub fn expand(
-    index: &Path,
-    id: &SymbolId,
-    depth: u32,
-    kinds: &[EdgeKind],
-    dir: Direction,
-) -> Result<Subgraph> {
-    let conn = open_read(index)?;
-
-    let anchor = match fetch_symbol(&conn, id)? {
-        Some(s) => s,
-        None => {
-            return Ok(Subgraph {
-                nodes: Vec::new(),
-                edges: Vec::new(),
-                max_depth_reached: 0,
-            });
-        }
-    };
-
-    if depth == 0 {
-        return Ok(Subgraph {
-            nodes: vec![anchor],
-            edges: Vec::new(),
-            max_depth_reached: 0,
-        });
-    }
-
-    let kinds_owned: Vec<EdgeKind> = if kinds.is_empty() {
-        EdgeKind::all().to_vec()
-    } else {
-        kinds.to_vec()
-    };
-    let want_out = matches!(dir, Direction::Out | Direction::Both);
-    let want_in = matches!(dir, Direction::In | Direction::Both);
-
-    let mut visited_nodes: std::collections::BTreeMap<String, SymbolRecord> =
-        std::collections::BTreeMap::new();
-    visited_nodes.insert(anchor.id.0.clone(), anchor.clone());
-    let mut all_edges: Vec<NeighborEdge> = Vec::new();
-    let mut frontier: Vec<SymbolId> = vec![anchor.id.clone()];
-    let mut reached: u32 = 0;
-
-    for d in 1..=depth {
-        if frontier.is_empty() {
-            break;
-        }
-        let mut next: Vec<SymbolId> = Vec::new();
-        for source_id in &frontier {
-            let edges = neighbors_inner(&conn, source_id, &kinds_owned, want_out, want_in)?;
-            for e in edges {
-                if let Some(dst) = &e.dst {
-                    if !visited_nodes.contains_key(&dst.id.0) {
-                        visited_nodes.insert(dst.id.0.clone(), dst.clone());
-                        next.push(dst.id.clone());
-                    }
-                }
-                if !visited_nodes.contains_key(&e.src.id.0) {
-                    visited_nodes.insert(e.src.id.0.clone(), e.src.clone());
-                }
-                all_edges.push(e);
-            }
-        }
-        if !next.is_empty() {
-            reached = d;
-        }
-        frontier = next;
-    }
-
-    let nodes: Vec<SymbolRecord> = visited_nodes.into_values().collect();
-    Ok(Subgraph {
-        nodes,
-        edges: all_edges,
-        max_depth_reached: reached,
-    })
 }
 
 // `src` may be a pseudo-id like `file:<path>` (build-side artifact for Contains
@@ -370,7 +451,10 @@ fn neighbors_inner(
     let placeholders = vec!["?"; kinds.len()].join(",");
     let mut out: Vec<NeighborEdge> = Vec::new();
     let active: &[(&str, Direction)] = match (want_out, want_in) {
-        (true, true) => &[("src_symbol_id", Direction::Out), ("dst_symbol_id", Direction::In)],
+        (true, true) => &[
+            ("src_symbol_id", Direction::Out),
+            ("dst_symbol_id", Direction::In),
+        ],
         (true, false) => &[("src_symbol_id", Direction::Out)],
         (false, true) => &[("dst_symbol_id", Direction::In)],
         (false, false) => &[],
@@ -389,7 +473,8 @@ fn neighbors_inner(
         for k in kinds {
             p.push(Box::new(k.as_str().to_string()));
         }
-        let p_refs: Vec<&dyn duckdb::ToSql> = p.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
+        let p_refs: Vec<&dyn duckdb::ToSql> =
+            p.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
         let rows = stmt.query_map(p_refs.as_slice(), |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -415,88 +500,6 @@ fn neighbors_inner(
                 dst_unresolved: unresolved,
             });
         }
-    }
-    Ok(out)
-}
-
-pub fn findings(index: &Path, filter: FindingFilter) -> Result<Vec<FindingRecord>> {
-    let conn = open_read(index)?;
-
-    let mut symbol_anchor: Option<(FileId, u32, u32)> = None;
-    if let Some(sid) = &filter.symbol_id {
-        match fetch_symbol(&conn, sid)? {
-            Some(s) => {
-                symbol_anchor = Some((s.file_id, s.anchor.start_line, s.anchor.end_line));
-            }
-            None => return Ok(Vec::new()),
-        }
-    }
-
-    let mut where_parts: Vec<String> = Vec::new();
-    let mut bound: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
-    if let Some(rule) = &filter.rule_id {
-        where_parts.push("fnd.rule_id = ?".to_string());
-        bound.push(Box::new(rule.clone()));
-    }
-    if let Some(prefix) = &filter.path_prefix {
-        where_parts.push("f.path LIKE ? ESCAPE '\\'".to_string());
-        bound.push(Box::new(like_escape(prefix)));
-    }
-    if let Some((fid, start, end)) = symbol_anchor {
-        where_parts.push("fnd.file_id = ? AND fnd.end_line >= ? AND fnd.start_line <= ?".to_string());
-        bound.push(Box::new(fid));
-        bound.push(Box::new(start as i32));
-        bound.push(Box::new(end as i32));
-    }
-
-    let where_clause = if where_parts.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", where_parts.join(" AND "))
-    };
-    let sql = format!(
-        "SELECT fnd.rule_id, fnd.file_id, f.path, fnd.start_line, fnd.end_line, fnd.message \
-         FROM findings fnd JOIN files f ON f.file_id = fnd.file_id{where_clause} \
-         ORDER BY f.path, fnd.start_line, fnd.rule_id"
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-    let p_refs: Vec<&dyn duckdb::ToSql> = bound.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
-    let rows = stmt.query_map(p_refs.as_slice(), |r| {
-        Ok(FindingRecord {
-            rule_id: r.get(0)?,
-            file_id: r.get(1)?,
-            path: r.get(2)?,
-            start_line: r.get::<_, i32>(3)? as u32,
-            end_line: r.get::<_, i32>(4)? as u32,
-            message: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
-        })
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
-}
-
-pub fn importers_of_file(index: &Path, file_path: &str) -> Result<Vec<SymbolRecord>> {
-    let conn = open_read(index)?;
-    let sql = format!(
-        "SELECT DISTINCT src.symbol_id, src.file_id, src_f.path, src.qualified_name, src.kind, src.signature, \
-                src.anchor_start_byte, src.anchor_end_byte, src.anchor_start_line, src.anchor_end_line \
-         FROM edges e \
-         JOIN symbols src ON src.symbol_id = e.src_symbol_id \
-         JOIN files src_f ON src_f.file_id = src.file_id \
-         JOIN symbols dst ON dst.symbol_id = e.dst_symbol_id \
-         JOIN files dst_f ON dst_f.file_id = dst.file_id \
-         WHERE e.kind = ? AND dst_f.path = ? \
-         ORDER BY src_f.path, src.anchor_start_byte"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![EdgeKind::Imports.as_str(), file_path], map_symbol_row)?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
     }
     Ok(out)
 }

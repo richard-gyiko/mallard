@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use duckdb::Connection;
 use mallard::{
-    BuildRequest, Direction, EdgeKind, FindingFilter, MallardError, SymbolId, build, query,
+    BuildRequest, Direction, EdgeKind, FindingFilter, IndexReader, MallardError, SymbolId, build,
 };
 use tempfile::TempDir;
 
@@ -33,8 +33,12 @@ fn build_fixture(out: &PathBuf, with_rules: bool) {
     build(req).unwrap();
 }
 
+fn open_reader(index: &PathBuf) -> IndexReader {
+    IndexReader::open(index).unwrap()
+}
+
 fn find_symbol(index: &PathBuf, path: &str, qualified_name: &str) -> SymbolId {
-    let symbols = query::symbols_in_file(index, path).unwrap();
+    let symbols = open_reader(index).symbols_in_file(path).unwrap();
     symbols
         .into_iter()
         .find(|s| s.qualified_name == qualified_name)
@@ -48,7 +52,7 @@ fn metadata_returns_sha_and_format_version() {
     let out = tmp.path().join("index.duckdb");
     build_fixture(&out, true);
 
-    let meta = query::metadata(&out).unwrap();
+    let meta = open_reader(&out).metadata().unwrap();
     assert_eq!(meta.sha.as_deref(), Some("deadbeefcafe"));
     assert_eq!(meta.index_format_version, 1);
     assert!(meta.indexer_version.is_some());
@@ -63,11 +67,16 @@ fn lookup_symbol_present_and_missing() {
     build_fixture(&out, false);
 
     let id = find_symbol(&out, "lib.rs", "double");
-    let found = query::lookup_symbol(&out, &id).unwrap().expect("symbol present");
+    let found = open_reader(&out)
+        .lookup_symbol(&id)
+        .unwrap()
+        .expect("symbol present");
     assert_eq!(found.qualified_name, "double");
     assert_eq!(found.path, "lib.rs");
 
-    let missing = query::lookup_symbol(&out, &SymbolId("0".repeat(32))).unwrap();
+    let missing = open_reader(&out)
+        .lookup_symbol(&SymbolId("0".repeat(32)))
+        .unwrap();
     assert!(missing.is_none());
 }
 
@@ -77,7 +86,7 @@ fn symbols_in_file_enriches_path_and_anchor() {
     let out = tmp.path().join("index.duckdb");
     build_fixture(&out, false);
 
-    let syms = query::symbols_in_file(&out, "greet.rs").unwrap();
+    let syms = open_reader(&out).symbols_in_file("greet.rs").unwrap();
     let greet = syms
         .iter()
         .find(|s| s.qualified_name == "greet")
@@ -93,7 +102,9 @@ fn neighbors_out_calls_from_bump_reach_double() {
     build_fixture(&out, false);
 
     let bump = find_symbol(&out, "lib.rs", "Counter::bump");
-    let edges = query::neighbors(&out, &bump, &[EdgeKind::Calls], Direction::Out).unwrap();
+    let edges = open_reader(&out)
+        .neighbors(&bump, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
     assert!(!edges.is_empty(), "bump should call something");
     let mentions_double = edges.iter().any(|e| {
         e.dst.as_ref().map(|d| d.qualified_name == "double").unwrap_or(false)
@@ -109,7 +120,9 @@ fn expand_depth_zero_returns_source_only() {
     build_fixture(&out, false);
 
     let id = find_symbol(&out, "lib.rs", "double");
-    let g = query::expand(&out, &id, 0, &[], Direction::Both).unwrap();
+    let g = open_reader(&out)
+        .expand(&id, 0, &[], Direction::Both)
+        .unwrap();
     assert_eq!(g.nodes.len(), 1);
     assert!(g.edges.is_empty());
     assert_eq!(g.max_depth_reached, 0);
@@ -122,7 +135,9 @@ fn expand_depth_two_reaches_callees_transitively() {
     build_fixture(&out, false);
 
     let bump = find_symbol(&out, "lib.rs", "Counter::bump");
-    let g = query::expand(&out, &bump, 2, &[EdgeKind::Calls], Direction::Out).unwrap();
+    let g = open_reader(&out)
+        .expand(&bump, 2, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
     assert!(g.nodes.len() >= 2);
     assert!(g.edges.iter().any(|e| e.kind == EdgeKind::Calls));
     assert!(g.max_depth_reached >= 1);
@@ -134,17 +149,17 @@ fn findings_filter_by_rule_id() {
     let out = tmp.path().join("index.duckdb");
     build_fixture(&out, true);
 
-    let all = query::findings(&out, FindingFilter::default()).unwrap();
+    let all = open_reader(&out)
+        .findings(FindingFilter::default())
+        .unwrap();
     assert!(!all.is_empty());
 
-    let format_only = query::findings(
-        &out,
-        FindingFilter {
+    let format_only = open_reader(&out)
+        .findings(FindingFilter {
             rule_id: Some("rust-format-macro".to_string()),
             ..Default::default()
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     assert!(format_only.iter().all(|f| f.rule_id == "rust-format-macro"));
     assert!(!format_only.is_empty());
 }
@@ -155,14 +170,12 @@ fn findings_filter_by_path_prefix() {
     let out = tmp.path().join("index.duckdb");
     build_fixture(&out, true);
 
-    let only_main = query::findings(
-        &out,
-        FindingFilter {
+    let only_main = open_reader(&out)
+        .findings(FindingFilter {
             path_prefix: Some("main.rs".to_string()),
             ..Default::default()
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     assert!(!only_main.is_empty());
     assert!(only_main.iter().all(|f| f.path.starts_with("main.rs")));
 }
@@ -174,14 +187,12 @@ fn findings_filter_by_symbol_id_limits_to_anchor_lines() {
     build_fixture(&out, true);
 
     let greet = find_symbol(&out, "greet.rs", "greet");
-    let scoped = query::findings(
-        &out,
-        FindingFilter {
+    let scoped = open_reader(&out)
+        .findings(FindingFilter {
             symbol_id: Some(greet.clone()),
             ..Default::default()
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     assert!(!scoped.is_empty(), "expected format! finding inside greet");
     assert!(scoped.iter().all(|f| f.path == "greet.rs"));
 }
@@ -192,20 +203,20 @@ fn files_at_prefix_returns_matching_files() {
     let out = tmp.path().join("index.duckdb");
     build_fixture(&out, false);
 
-    let all = query::files_at_prefix(&out, "").unwrap();
+    let all = open_reader(&out).files_at_prefix("").unwrap();
     assert!(all.len() >= 4);
-    let only_lib = query::files_at_prefix(&out, "lib.rs").unwrap();
+    let only_lib = open_reader(&out).files_at_prefix("lib.rs").unwrap();
     assert_eq!(only_lib.len(), 1);
     assert_eq!(only_lib[0].path, "lib.rs");
 
-    let none = query::files_at_prefix(&out, "no/such/").unwrap();
+    let none = open_reader(&out).files_at_prefix("no/such/").unwrap();
     assert!(none.is_empty());
 }
 
 #[test]
 fn missing_index_file_errors() {
     let bogus = PathBuf::from("./does-not-exist.duckdb");
-    let err = query::metadata(&bogus).err().expect("should error");
+    let err = IndexReader::open(&bogus).err().expect("should error");
     assert!(matches!(err, MallardError::IndexNotFound(_)), "got: {err}");
 }
 
@@ -225,7 +236,7 @@ fn version_mismatch_is_explicit() {
         conn.close().unwrap();
     }
 
-    let err = query::metadata(&out).err().expect("should error");
+    let err = IndexReader::open(&out).err().expect("should error");
     match err {
         MallardError::VersionMismatch { found, expected } => {
             assert_eq!(found, 99);
