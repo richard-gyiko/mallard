@@ -19,4 +19,5 @@ pub use crate::index::build;
 pub use crate::query::{
     Direction, FileEdgeBundle, FileRecordOut, FindingFilter, FindingRecord, IndexReader,
     MetadataRecord, NeighborEdge, QueryRequest, QueryResult, Subgraph, SymbolRecord,
+    UnresolvedCallerHit,
 };
