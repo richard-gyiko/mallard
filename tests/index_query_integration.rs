@@ -246,6 +246,65 @@ fn cross_file_calls_resolve_after_build() {
 }
 
 #[test]
+fn edges_by_file_returns_bundle_per_symbol_with_edges() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let reader = open_reader(&out);
+    let bundles = reader
+        .edges_by_file("lib.rs", &[EdgeKind::Calls], Direction::Both)
+        .unwrap();
+
+    let bump = bundles
+        .iter()
+        .find(|b| b.symbol.qualified_name == "Counter::bump")
+        .expect("Counter::bump bundle present");
+    let calls_double = bump.outbound.iter().any(|e| {
+        e.dst.as_ref().map(|d| d.qualified_name == "double").unwrap_or(false)
+            || e.dst_unresolved.as_deref() == Some("double")
+    });
+    assert!(
+        calls_double,
+        "Counter::bump outbound should mention double, got {:?}",
+        bump.outbound
+    );
+}
+
+#[test]
+fn edges_by_file_preserves_symbols_with_zero_edges() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let reader = open_reader(&out);
+    let bundles = reader
+        .edges_by_file("lib.rs", &[EdgeKind::Calls], Direction::Both)
+        .unwrap();
+
+    // The Counter struct itself is not callable; its bundle should still be
+    // present with empty outbound/inbound on `calls`.
+    let counter = bundles
+        .iter()
+        .find(|b| b.symbol.qualified_name == "Counter")
+        .expect("Counter bundle present");
+    assert!(counter.outbound.is_empty());
+    assert!(counter.inbound.is_empty());
+}
+
+#[test]
+fn edges_by_file_empty_file_path_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let bundles = open_reader(&out)
+        .edges_by_file("no/such/file.rs", &[], Direction::Both)
+        .unwrap();
+    assert!(bundles.is_empty());
+}
+
+#[test]
 fn run_dispatches_query_request_metadata() {
     let tmp = TempDir::new().unwrap();
     let out = tmp.path().join("index.duckdb");

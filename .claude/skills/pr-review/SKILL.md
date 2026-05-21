@@ -85,30 +85,41 @@ done > added.txt
 
 Stage 3 misses the bulk of real PRs: **body-only changes don't change the symbol ID.** A function whose body changes but signature stays stable looks unchanged in stage 3. Edge-diff catches it.
 
-For every symbol present in **both** indexes with the same ID, diff its outbound `calls` edges between base and head:
+Use the bulk `edges-by-file` primitive: one query per file per direction returns every symbol in the file plus its outbound + inbound edges. Set-diff base vs head on each shared-ID symbol's `outbound` calls.
 
 ```bash
-# For each file's stable-ID symbols (intersection of head and base):
 for f in $CHANGED; do
-  comm -12 \
-    <("$MALLARD" query symbols-in-file "$f" --index head.duckdb 2>/dev/null | jq -r '.value[].id' | sort) \
-    <("$MALLARD" query symbols-in-file "$f" --index base.duckdb 2>/dev/null | jq -r '.value[].id' | sort) \
-    | while read -r id; do
-        # Outbound callees in each index (resolved + unresolved).
-        base_calls=$("$MALLARD" query neighbors "$id" --kind calls --direction out --index base.duckdb \
-                     | jq -r '.value[] | .dst.qualified_name // ("[" + .dst_unresolved + "]")' | sort -u)
-        head_calls=$("$MALLARD" query neighbors "$id" --kind calls --direction out --index head.duckdb \
-                     | jq -r '.value[] | .dst.qualified_name // ("[" + .dst_unresolved + "]")' | sort -u)
-        added_calls=$(comm -13 <(echo "$base_calls") <(echo "$head_calls"))
-        removed_calls=$(comm -23 <(echo "$base_calls") <(echo "$head_calls"))
-        if [ -n "$added_calls" ] || [ -n "$removed_calls" ]; then
-          echo "modified-body $f $id added=[$(echo "$added_calls" | tr '\n' ',')] removed=[$(echo "$removed_calls" | tr '\n' ',')]"
-        fi
-      done
+  base_bundles=$("$MALLARD" query edges-by-file "$f" --kind calls --direction out --index base.duckdb 2>/dev/null \
+                 | jq -c '.value[]')
+  head_bundles=$("$MALLARD" query edges-by-file "$f" --kind calls --direction out --index head.duckdb 2>/dev/null \
+                 | jq -c '.value[]')
+
+  # Index base bundles by symbol_id for fast lookup.
+  declare -A base_by_id
+  while IFS= read -r b; do
+    id=$(echo "$b" | jq -r '.symbol.id')
+    base_by_id["$id"]="$b"
+  done <<< "$base_bundles"
+
+  while IFS= read -r hb; do
+    id=$(echo "$hb" | jq -r '.symbol.id')
+    [ -z "${base_by_id[$id]+x}" ] && continue   # added in head only -> stage 3 already saw it
+    bb="${base_by_id[$id]}"
+    base_t=$(echo "$bb" | jq -r '.outbound[] | .dst.qualified_name // ("[" + .dst_unresolved + "]")' | sort -u)
+    head_t=$(echo "$hb" | jq -r '.outbound[] | .dst.qualified_name // ("[" + .dst_unresolved + "]")' | sort -u)
+    added=$(comm -13 <(echo "$base_t") <(echo "$head_t"))
+    removed=$(comm -23 <(echo "$base_t") <(echo "$head_t"))
+    if [ -n "$added" ] || [ -n "$removed" ]; then
+      qname=$(echo "$hb" | jq -r '.symbol.qualified_name')
+      echo "modified-body $f $qname id=$id added=[$(echo "$added" | tr '\n' ',')] removed=[$(echo "$removed" | tr '\n' ',')]"
+    fi
+  done <<< "$head_bundles"
 done > modified_body.txt
 ```
 
 A symbol with `modified-body` status has a changed implementation. The added/removed callee names are the **shape of what changed**, even if the body source isn't available to mallard.
+
+**Performance**: `edges-by-file` collapses what was previously N+1 (one `neighbors` per symbol) into one query per file per direction. On a 4-file PR with ~60 stable symbols, stage 4 runs in seconds rather than minutes.
 
 If both stage 3 and stage 4 produce empty sets, stop and emit "diff touches no parseable structural changes" summary.
 
