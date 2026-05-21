@@ -151,12 +151,12 @@ fn findings_filter_by_rule_id() {
     build_fixture(&out, true);
 
     let all = open_reader(&out)
-        .findings(FindingFilter::default())
+        .findings(&FindingFilter::default())
         .unwrap();
     assert!(!all.is_empty());
 
     let format_only = open_reader(&out)
-        .findings(FindingFilter {
+        .findings(&FindingFilter {
             rule_id: Some("rust-format-macro".to_string()),
             ..Default::default()
         })
@@ -172,7 +172,7 @@ fn findings_filter_by_path_prefix() {
     build_fixture(&out, true);
 
     let only_main = open_reader(&out)
-        .findings(FindingFilter {
+        .findings(&FindingFilter {
             path_prefix: Some("main.rs".to_string()),
             ..Default::default()
         })
@@ -189,7 +189,7 @@ fn findings_filter_by_symbol_id_limits_to_anchor_lines() {
 
     let greet = find_symbol(&out, "greet.rs", "greet");
     let scoped = open_reader(&out)
-        .findings(FindingFilter {
+        .findings(&FindingFilter {
             symbol_id: Some(greet.clone()),
             ..Default::default()
         })

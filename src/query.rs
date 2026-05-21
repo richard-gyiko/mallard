@@ -332,7 +332,7 @@ impl IndexReader {
         })
     }
 
-    pub fn findings(&self, filter: FindingFilter) -> Result<Vec<FindingRecord>> {
+    pub fn findings(&self, filter: &FindingFilter) -> Result<Vec<FindingRecord>> {
         let mut symbol_anchor: Option<(FileId, u32, u32)> = None;
         if let Some(sid) = &filter.symbol_id {
             match fetch_symbol(&self.conn, sid)? {
@@ -408,9 +408,7 @@ impl IndexReader {
             } => Ok(QueryResult::Expand(
                 self.expand(id, *depth, kinds, *direction)?,
             )),
-            QueryRequest::Findings { filter } => {
-                Ok(QueryResult::Findings(self.findings(filter.clone())?))
-            }
+            QueryRequest::Findings { filter } => Ok(QueryResult::Findings(self.findings(filter)?)),
             QueryRequest::SymbolsInFile { path } => {
                 Ok(QueryResult::SymbolsInFile(self.symbols_in_file(path)?))
             }
