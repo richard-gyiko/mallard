@@ -10,7 +10,15 @@ Layered-pipeline PR reviewer per [ADR-0009](../../../docs/decisions/0009-pr-revi
 Background:
 - [docs/specs/pr-review/pull-request-review.md](../../../docs/specs/pr-review/pull-request-review.md) — wedge contract (citations required, deterministic vs synthesized labelling, comment budget).
 - [ADR-0009](../../../docs/decisions/0009-pr-review-architecture-pattern.md) — pipeline pattern + first-pass-assistant framing.
-- [mallard skill](../mallard/SKILL.md) — index + query primitives, JSON envelope, composition patterns.
+- [mallard skill](../mallard/SKILL.md) — index + query primitives, JSON envelope, composition patterns, invocation modes.
+
+## Prereqs
+
+- `gh` (authenticated via `gh auth login`) — for PR metadata. If unavailable, accept base + head SHAs as direct args.
+- `git` — for worktrees.
+- `cargo` or a prebuilt mallard binary. **Strong recommendation**: `cargo build --release` once at session start and call `./target/release/mallard` directly. Calling `cargo run -- query ... > file.json` is fragile because cargo writes incremental-compilation warnings to stderr that bleed into stdout under some shells.
+- `jq` for JSON extraction (Bash) **or** PowerShell `ConvertFrom-Json` (Windows). The recipes below default to `jq`; PowerShell equivalents in [`references/powershell-recipes.md`](references/powershell-recipes.md).
+- On Windows the release binary may fail under git-bash (`STATUS_DLL_NOT_FOUND`); use PowerShell or cmd instead.
 
 ## Trust framing
 
@@ -18,7 +26,7 @@ This is a **first-pass assistant with human oversight**. Deterministic-rule find
 
 ## Workflow
 
-Six stages. Each stage runs to completion before the next starts.
+Seven stages. Each stage runs to completion before the next starts.
 
 ### 1. Identify base + head SHAs and changed files
 
@@ -39,67 +47,101 @@ Filter `$CHANGED` to files mallard can index (today: `*.rs` only). If nothing re
 One per SHA, using a git worktree so the working tree is undisturbed.
 
 ```bash
+MALLARD=./target/release/mallard   # built once at session start; or use `cargo run --quiet --` and redirect stderr on every call
+
 git worktree add /tmp/pr-base "$BASE"
-mallard index /tmp/pr-base --sha "$BASE" --out base.duckdb --rules tests/fixtures/rules.yml
+"$MALLARD" index /tmp/pr-base --sha "$BASE" --out base.duckdb --rules tests/fixtures/rules.yml
 git worktree remove /tmp/pr-base
 
 git worktree add /tmp/pr-head "$HEAD"
-mallard index /tmp/pr-head --sha "$HEAD" --out head.duckdb --rules tests/fixtures/rules.yml
+"$MALLARD" index /tmp/pr-head --sha "$HEAD" --out head.duckdb --rules tests/fixtures/rules.yml
 git worktree remove /tmp/pr-head
 ```
 
 Pass `--rules` only if the repo has a rules YAML; otherwise findings will be empty (still valid, just no deterministic-hard layer).
 
-### 3. Compute the changed-symbol set
+**Caching**: if you're reviewing multiple PRs against the same base SHA, reuse `base.duckdb` across reviews. The mallard CLI doesn't need re-running for an unchanged base.
+
+### 3. Compute the changed-symbol set (signature-shape diff)
 
 For each changed file, set-difference head symbol IDs against base. Per mallard's stable-ID rule (`(file_path, qualified_name, kind, signature)`), this yields:
 
 - **added**: in head, not in base.
 - **removed**: in base, not in head.
-- **modified**: same path + qualified name + kind, different signature → looks like one removed + one added with the same name. Reconcile by qualified name.
+- **modified-signature**: same path + qualified name + kind, different signature → looks like one removed + one added with the same name. Reconcile by qualified name.
 
 ```bash
 for f in $CHANGED; do
   comm -23 \
-    <(mallard query symbols-in-file "$f" --index head.duckdb 2>/dev/null | jq -r '.value[].id' | sort) \
-    <(mallard query symbols-in-file "$f" --index base.duckdb 2>/dev/null | jq -r '.value[].id' | sort) \
+    <("$MALLARD" query symbols-in-file "$f" --index head.duckdb 2>/dev/null | jq -r '.value[].id' | sort) \
+    <("$MALLARD" query symbols-in-file "$f" --index base.duckdb 2>/dev/null | jq -r '.value[].id' | sort) \
     | while read -r id; do echo "added $f $id"; done
 done > added.txt
 ```
 
-(Mirror with `-13` for removed.) For "modified" reconciliation: group added+removed pairs in the same file with the same `qualified_name`; treat as modified rather than separate add/remove.
+(Mirror with `-13` for removed.) For "modified-signature" reconciliation: group added+removed pairs in the same file with the same `qualified_name`; treat as modified-signature rather than separate add/remove.
 
-If the changed-symbol set is empty after filtering, stop and emit "diff touches no parseable symbols" summary.
+### 4. Compute body-level edge diff (modified-body)
 
-### 4. Gather evidence per changed symbol
+Stage 3 misses the bulk of real PRs: **body-only changes don't change the symbol ID.** A function whose body changes but signature stays stable looks unchanged in stage 3. Edge-diff catches it.
 
-For each `(kind, file, id)` in the changed set (treat added and modified the same way; removed get the base-side evidence instead):
+For every symbol present in **both** indexes with the same ID, diff its outbound `calls` edges between base and head:
 
 ```bash
-mallard query expand "$id" --depth 1 --kind calls --direction both --index head.duckdb > "evidence/$id.expand.json"
-mallard query findings --symbol-id "$id" --index head.duckdb > "evidence/$id.findings.json"
+# For each file's stable-ID symbols (intersection of head and base):
+for f in $CHANGED; do
+  comm -12 \
+    <("$MALLARD" query symbols-in-file "$f" --index head.duckdb 2>/dev/null | jq -r '.value[].id' | sort) \
+    <("$MALLARD" query symbols-in-file "$f" --index base.duckdb 2>/dev/null | jq -r '.value[].id' | sort) \
+    | while read -r id; do
+        # Outbound callees in each index (resolved + unresolved).
+        base_calls=$("$MALLARD" query neighbors "$id" --kind calls --direction out --index base.duckdb \
+                     | jq -r '.value[] | .dst.qualified_name // ("[" + .dst_unresolved + "]")' | sort -u)
+        head_calls=$("$MALLARD" query neighbors "$id" --kind calls --direction out --index head.duckdb \
+                     | jq -r '.value[] | .dst.qualified_name // ("[" + .dst_unresolved + "]")' | sort -u)
+        added_calls=$(comm -13 <(echo "$base_calls") <(echo "$head_calls"))
+        removed_calls=$(comm -23 <(echo "$base_calls") <(echo "$head_calls"))
+        if [ -n "$added_calls" ] || [ -n "$removed_calls" ]; then
+          echo "modified-body $f $id added=[$(echo "$added_calls" | tr '\n' ',')] removed=[$(echo "$removed_calls" | tr '\n' ',')]"
+        fi
+      done
+done > modified_body.txt
+```
+
+A symbol with `modified-body` status has a changed implementation. The added/removed callee names are the **shape of what changed**, even if the body source isn't available to mallard.
+
+If both stage 3 and stage 4 produce empty sets, stop and emit "diff touches no parseable structural changes" summary.
+
+### 5. Gather evidence per changed symbol
+
+For each `(kind, file, id)` in the changed set (added, modified-signature, modified-body — all the same evidence shape; removed get base-side evidence instead):
+
+```bash
+"$MALLARD" query expand "$id" --depth 1 --kind calls --direction both --index head.duckdb > "evidence/$id.expand.json"
+"$MALLARD" query findings --symbol-id "$id" --index head.duckdb > "evidence/$id.findings.json"
 ```
 
 Depth-1 is the right default. Go to depth-2 only when the symbol is small (a leaf function) and the depth-1 frontier is sparse. Higher depths blow the context budget per ADR-0007's attention-dilution evidence.
 
-For removed symbols, evidence comes from `base.duckdb` instead of `head.duckdb`. Use it to reason about callers that no longer have a target.
+For removed symbols, evidence comes from `base.duckdb` instead of `head.duckdb` — use it to reason about callers that no longer have a target.
 
-### 5. Synthesize review comments
+### 6. Synthesize review comments
 
 For each changed symbol, decide whether to emit comments. Two channels:
 
 **Deterministic-hard** — every finding from `evidence/<id>.findings.json` becomes a candidate comment. Body = the rule's `message`. Source kind = `structural-rule`. Confidence = high (rules are reproducible).
 
-**LLM-soft** — reason from the assembled evidence to identify likely issues. Examples worth surfacing:
+**LLM-soft** — reason from the assembled evidence (including the stage-4 modified-body deltas) to identify likely issues. Examples worth surfacing:
 
-- A modified function whose callers (`expand --direction in --kind calls`) pass arguments that no longer match the new signature.
+- A modified-signature function whose callers (`expand --direction in --kind calls`) pass arguments that no longer match the new signature.
+- A modified-body function whose new outbound calls land on `dst_unresolved` names that look risky (e.g., suddenly calling `panic!`, `unwrap`, `unsafe` blocks).
 - A removed public function with inbound callers in the head index (definitely broken).
 - A new function added but never called (possibly dead code — low confidence).
 - A function that grew significantly and now hits a structural-rule finding.
 
 For every emitted comment, the spec ([docs/specs/pr-review/pull-request-review.md](../../../docs/specs/pr-review/pull-request-review.md)) requires citing the evidence: at minimum a symbol ID, optionally edge paths and rule IDs. Comments without citations must not be emitted.
 
-### 6. Cap and label
+### 7. Cap and label
 
 Per-PR comment budget: default 10 total comments (5 deterministic-hard + 5 LLM-soft is a starting split; adjust per repo). Drop lowest-confidence comments first if over budget.
 
@@ -108,7 +150,7 @@ Per-PR comment budget: default 10 total comments (5 deterministic-hard + 5 LLM-s
 Markdown ordered by file path, head-side line range. Each comment looks like:
 
 ```
-### src/query.rs:312–340 — `IndexReader::expand` (modified)
+### src/query.rs:312–340 — `IndexReader::expand` (modified-signature)
 
 `expand`'s signature changed from `(id, depth, kinds, dir)` to `(id, depth, &kinds, dir)`. Three caller sites still pass an owned `Vec<EdgeKind>` and will hit a borrow-checker error.
 
@@ -122,17 +164,21 @@ Markdown ordered by file path, head-side line range. Each comment looks like:
 End the report with a summary line:
 
 ```
-Reviewed N changed symbols across M files. Emitted X comments (Y structural-rule, Z graph-synthesis). Dropped W to fit budget.
+Reviewed N changed symbols across M files (X added, Y modified-signature, Z modified-body, W removed). Emitted P comments (Q structural-rule, R graph-synthesis). Dropped S to fit budget.
 ```
 
 ## Gotchas
 
+- **Body-only changes need stage 4.** The most common PR shape (refactor, internal logic tweak) doesn't change any signature. Skip stage 4 and you'll emit "diff touches no symbols" on real PRs.
+- **Const / static / type-alias symbols carry no `calls` edges.** They aren't callable, so `expand --kind calls` returns empty. That's expected — don't read it as "dead code". See `mallard` skill's Gotchas.
+- **Cross-file resolution is heuristic** ([ADR-0008](../../../docs/decisions/0008-heuristic-name-resolution.md)). Stdlib / external calls land as `dst_unresolved`. Synthesized comments must not assume "no caller" means "no caller exists" — only "no caller could be resolved within the indexed crate".
 - **Worktrees use disk and time.** Two `git worktree add` + `mallard index` runs is the right cost for a real PR review. Cache `base.duckdb` per base SHA across reviews of the same branch.
 - **`comm` requires sorted input.** Always pipe `| sort` before `comm`.
 - **Unparseable files** (per mallard's `parse_errors` table) still appear in `symbols-in-file` as `[]`. Don't conclude "no symbols changed" from an empty `comm` if the file failed to parse — check the parse-error log first.
-- **Cross-file resolution is heuristic** ([ADR-0008](../../../docs/decisions/0008-heuristic-name-resolution.md)). Synthesized comments should not assume an absent caller means no caller — only that no caller could be resolved within the repo. Stdlib / external calls are invisible.
 - **Generated files and lockfiles** should be suppressed before stage 1. Surface them as "skipped" in the summary, never as findings.
 - **`gh pr view`** requires `gh auth login`. If the user can't authenticate, accept base + head SHAs as direct arguments.
+- **Cargo stderr corrupts captured JSON.** `cargo run -- query ... > file.json` writes incremental-compile warnings into `file.json`. Always either use the prebuilt binary or redirect stderr (`2>/dev/null` in bash, `2>$null` in PowerShell).
+- **PowerShell users**: see [`references/powershell-recipes.md`](references/powershell-recipes.md) for the stage-3 / stage-4 equivalents without `jq` and `comm`.
 
 ## When this skill is wrong
 
