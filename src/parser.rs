@@ -1,9 +1,9 @@
-use tree_sitter::{Node, Parser as TsParser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 use crate::core::{
-    Anchor, Edge, EdgeKind, FileId, MallardError, ParseError, ParsedFile, Result, Symbol, SymbolId,
-    SymbolKind,
+    Anchor, Edge, EdgeKind, FileId, ParseError, ParsedFile, Result, Symbol, SymbolId, SymbolKind,
 };
+use crate::parsed_source::ParsedSource;
 
 const RUST_QUERY: &str = r#"
 (function_item name: (identifier) @def.function.name) @def.function
@@ -34,59 +34,51 @@ const RUST_QUERY: &str = r#"
 "#;
 
 pub struct RustParser {
-    parser: TsParser,
     query: Query,
     cursor: QueryCursor,
 }
 
 impl RustParser {
     pub fn new() -> Result<Self> {
-        let mut parser = TsParser::new();
         let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        parser.set_language(&language)?;
         let query = Query::new(&language, RUST_QUERY)?;
         Ok(RustParser {
-            parser,
             query,
             cursor: QueryCursor::new(),
         })
     }
 
-    pub fn parse_file(
+    pub fn extract_from(
         &mut self,
+        parsed: &ParsedSource,
         file_id: FileId,
         relative_path: &str,
-        source: &[u8],
-    ) -> Result<ParsedFile> {
-        let t_parse = std::time::Instant::now();
-        let tree = self
-            .parser
-            .parse(source, None)
-            .ok_or_else(|| MallardError::Other(format!("parser returned None for {relative_path}")))?;
-        let parse_ms = t_parse.elapsed().as_millis() as u64;
+    ) -> ParsedFile {
+        let source = parsed.source().as_bytes();
+        let root = parsed.ts_root();
 
         let mut parse_errors: Vec<ParseError> = Vec::new();
-        if tree.root_node().has_error() {
-            collect_errors(tree.root_node(), source, file_id, &mut parse_errors);
+        if root.has_error() {
+            collect_errors(root, source, file_id, &mut parse_errors);
         }
 
         let t_query = std::time::Instant::now();
-        let (symbols, edges) = self.extract(&tree, source, file_id, relative_path);
+        let (symbols, edges) = self.extract(root, source, file_id, relative_path);
         let query_ms = t_query.elapsed().as_millis() as u64;
 
-        Ok(ParsedFile {
+        ParsedFile {
             file_id,
             symbols,
             edges,
             parse_errors,
-            parse_ms,
+            parse_ms: parsed.parse_ms,
             query_ms,
-        })
+        }
     }
 
     fn extract(
         &mut self,
-        tree: &Tree,
+        root: Node<'_>,
         source: &[u8],
         file_id: FileId,
         relative_path: &str,
@@ -95,7 +87,7 @@ impl RustParser {
         let mut references: Vec<(Node, String, EdgeKind)> = Vec::new();
         let mut imports: Vec<(Node, String)> = Vec::new();
 
-        let mut matches = self.cursor.matches(&self.query, tree.root_node(), source);
+        let mut matches = self.cursor.matches(&self.query, root, source);
         while let Some(m) = matches.next() {
             let pattern = m.pattern_index;
             match pattern {
