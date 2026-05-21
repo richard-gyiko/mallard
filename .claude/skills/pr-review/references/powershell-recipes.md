@@ -38,27 +38,30 @@ foreach ($f in $CHANGED) {
 
 ## Stage 4: modified-body edge diff
 
-For symbols present in both indexes (same ID), set-diff their outbound `calls` edge targets.
+Uses the bulk `edges-by-file` primitive — one query per file per direction. For each shared-ID symbol, set-diff base vs head `outbound`.
 
 ```powershell
 foreach ($f in $CHANGED) {
-    $baseSyms = (& $M query symbols-in-file $f --index base.duckdb 2>$null | ConvertFrom-Json).value
-    $headSyms = (& $M query symbols-in-file $f --index head.duckdb 2>$null | ConvertFrom-Json).value
-    $shared   = $baseSyms | Where-Object { $headSyms.id -contains $_.id }
+    $baseBundles = (& $M query edges-by-file $f --kind calls --direction out --index base.duckdb 2>$null | ConvertFrom-Json).value
+    $headBundles = (& $M query edges-by-file $f --kind calls --direction out --index head.duckdb 2>$null | ConvertFrom-Json).value
+    $baseById = @{}
+    $baseBundles | ForEach-Object { $baseById[$_.symbol.id] = $_ }
 
-    foreach ($s in $shared) {
-        $baseE = (& $M query neighbors $s.id --kind calls --direction out --index base.duckdb 2>$null | ConvertFrom-Json).value
-        $headE = (& $M query neighbors $s.id --kind calls --direction out --index head.duckdb 2>$null | ConvertFrom-Json).value
-        $baseTargets = $baseE | ForEach-Object { if ($_.dst) { $_.dst.qualified_name } else { "[$($_.dst_unresolved)]" } } | Sort-Object -Unique
-        $headTargets = $headE | ForEach-Object { if ($_.dst) { $_.dst.qualified_name } else { "[$($_.dst_unresolved)]" } } | Sort-Object -Unique
-        $addedCalls   = $headTargets | Where-Object { $_ -notin $baseTargets }
-        $removedCalls = $baseTargets | Where-Object { $_ -notin $headTargets }
-        if ($addedCalls -or $removedCalls) {
-            "modified-body $f $($s.qualified_name) id=$($s.id) added={$($addedCalls -join ',')} removed={$($removedCalls -join ',')}"
+    foreach ($hb in $headBundles) {
+        if (-not $baseById.ContainsKey($hb.symbol.id)) { continue }   # added in head only -> stage 3 saw it
+        $bb = $baseById[$hb.symbol.id]
+        $baseTargets = @($bb.outbound | ForEach-Object { if ($_.dst) { $_.dst.qualified_name } else { "[$($_.dst_unresolved)]" } } | Sort-Object -Unique)
+        $headTargets = @($hb.outbound | ForEach-Object { if ($_.dst) { $_.dst.qualified_name } else { "[$($_.dst_unresolved)]" } } | Sort-Object -Unique)
+        $addedCalls   = @($headTargets | Where-Object { $_ -notin $baseTargets })
+        $removedCalls = @($baseTargets | Where-Object { $_ -notin $headTargets })
+        if ($addedCalls.Count -gt 0 -or $removedCalls.Count -gt 0) {
+            "modified-body $f $($hb.symbol.qualified_name) id=$($hb.symbol.id) added={$($addedCalls -join ',')} removed={$($removedCalls -join ',')}"
         }
     }
 }
 ```
+
+Verified on PR #7 (4 files, ~60 stable symbols): **8.1 seconds wall clock** with the new primitive vs ~5 minutes with the per-symbol `neighbors` approach.
 
 ## Stage 5: gather evidence
 

@@ -106,6 +106,16 @@ mallard query findings --path-prefix src/ --index "$INDEX"
 mallard query findings --symbol-id <id> --index "$INDEX"
 ```
 
+### `edges-by-file <path> --kind <k1,k2> --direction <in|out|both>`
+
+Bulk per-file edges: every symbol in the file, plus its `outbound` and `inbound` edges (peer-enriched). Symbols with no edges still appear with empty arrays so callers can set-diff bundles across two indexes without re-querying.
+
+```bash
+mallard query edges-by-file src/query.rs --kind calls --direction both --index "$INDEX"
+```
+
+One SQL query per active direction, collapsing the N+1 pattern of looping `neighbors` over `symbols-in-file`. Use for per-file blast-radius analysis and PR-review stage-4 edge diff.
+
 ### `files [--prefix <p>]`
 
 File records (path, language, size, status). Empty prefix = all files.

@@ -92,6 +92,17 @@ pub struct MetadataRecord {
     pub index_format_version: u32,
 }
 
+/// Bulk per-file output: every symbol defined in the file, plus its
+/// outbound and inbound edges (peer-enriched). Symbols with zero edges
+/// still appear with empty `outbound` / `inbound` so callers can
+/// `comm`-diff bundles across base/head without re-querying.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEdgeBundle {
+    pub symbol: SymbolRecord,
+    pub outbound: Vec<NeighborEdge>,
+    pub inbound: Vec<NeighborEdge>,
+}
+
 /// Adapter-facing request that crosses the query seam. CLI marshals argv into
 /// one of these; future adapters (MCP, HTTP) build the same shape. The typed
 /// per-method API stays public for in-process Rust callers (retrieval,
@@ -118,6 +129,12 @@ pub enum QueryRequest {
         filter: FindingFilter,
     },
     SymbolsInFile { path: String },
+    EdgesByFile {
+        path: String,
+        #[serde(default)]
+        kinds: Vec<EdgeKind>,
+        direction: Direction,
+    },
     ImportersOfFile { path: String },
     FilesAtPrefix { prefix: String },
     Metadata,
@@ -131,6 +148,7 @@ pub enum QueryResult {
     Expand(Subgraph),
     Findings(Vec<FindingRecord>),
     SymbolsInFile(Vec<SymbolRecord>),
+    EdgesByFile(Vec<FileEdgeBundle>),
     ImportersOfFile(Vec<SymbolRecord>),
     FilesAtPrefix(Vec<FileRecordOut>),
     Metadata(MetadataRecord),
@@ -412,6 +430,13 @@ impl IndexReader {
             QueryRequest::SymbolsInFile { path } => {
                 Ok(QueryResult::SymbolsInFile(self.symbols_in_file(path)?))
             }
+            QueryRequest::EdgesByFile {
+                path,
+                kinds,
+                direction,
+            } => Ok(QueryResult::EdgesByFile(
+                self.edges_by_file(path, kinds, *direction)?,
+            )),
             QueryRequest::ImportersOfFile { path } => {
                 Ok(QueryResult::ImportersOfFile(self.importers_of_file(path)?))
             }
@@ -420,6 +445,144 @@ impl IndexReader {
             }
             QueryRequest::Metadata => Ok(QueryResult::Metadata(self.metadata()?)),
         }
+    }
+
+    /// Bulk per-file edges. One SQL query per active direction; preserves
+    /// symbols with no edges so callers can `comm`-diff bundles without
+    /// re-querying.
+    pub fn edges_by_file(
+        &self,
+        file_path: &str,
+        kinds: &[EdgeKind],
+        dir: Direction,
+    ) -> Result<Vec<FileEdgeBundle>> {
+        use std::collections::BTreeMap;
+
+        let kinds: Vec<EdgeKind> = if kinds.is_empty() {
+            EdgeKind::all().to_vec()
+        } else {
+            kinds.to_vec()
+        };
+        let want_out = matches!(dir, Direction::Out | Direction::Both);
+        let want_in = matches!(dir, Direction::In | Direction::Both);
+
+        let kind_placeholders = vec!["?"; kinds.len()].join(",");
+
+        let mut bundles: BTreeMap<u64, FileEdgeBundle> = BTreeMap::new();
+
+        let symbols = self.symbols_in_file(file_path)?;
+        for s in symbols {
+            bundles.insert(
+                s.anchor.start_byte,
+                FileEdgeBundle {
+                    symbol: s,
+                    outbound: Vec::new(),
+                    inbound: Vec::new(),
+                },
+            );
+        }
+        if bundles.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if want_out {
+            let sql = format!(
+                "SELECT s.symbol_id, e.dst_symbol_id, e.dst_unresolved, e.kind \
+                 FROM symbols s \
+                 JOIN files f ON f.file_id = s.file_id \
+                 JOIN edges e ON e.src_symbol_id = s.symbol_id \
+                 WHERE f.path = ? AND e.kind IN ({kind_placeholders}) \
+                 ORDER BY s.anchor_start_byte, e.edge_id"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut p: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(kinds.len() + 1);
+            p.push(Box::new(file_path.to_string()));
+            for k in &kinds {
+                p.push(Box::new(k.as_str().to_string()));
+            }
+            let p_refs: Vec<&dyn duckdb::ToSql> =
+                p.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
+            let rows = stmt.query_map(p_refs.as_slice(), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (src_id, dst_id, dst_unresolved, kind_s) = row?;
+                let src_rec = match fetch_symbol(&self.conn, &SymbolId(src_id))? {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let dst_rec = match &dst_id {
+                    Some(s) => fetch_symbol(&self.conn, &SymbolId(s.clone()))?,
+                    None => None,
+                };
+                let bundle = bundles
+                    .values_mut()
+                    .find(|b| b.symbol.id == src_rec.id)
+                    .expect("symbol_id matches a symbol in this file");
+                bundle.outbound.push(NeighborEdge {
+                    kind: EdgeKind::from_str(&kind_s).unwrap_or(EdgeKind::Calls),
+                    direction: Direction::Out,
+                    src: src_rec,
+                    dst: dst_rec,
+                    dst_unresolved,
+                });
+            }
+        }
+
+        if want_in {
+            let sql = format!(
+                "SELECT s.symbol_id, e.src_symbol_id, e.kind \
+                 FROM symbols s \
+                 JOIN files f ON f.file_id = s.file_id \
+                 JOIN edges e ON e.dst_symbol_id = s.symbol_id \
+                 WHERE f.path = ? AND e.kind IN ({kind_placeholders}) \
+                 ORDER BY s.anchor_start_byte, e.edge_id"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let mut p: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(kinds.len() + 1);
+            p.push(Box::new(file_path.to_string()));
+            for k in &kinds {
+                p.push(Box::new(k.as_str().to_string()));
+            }
+            let p_refs: Vec<&dyn duckdb::ToSql> =
+                p.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
+            let rows = stmt.query_map(p_refs.as_slice(), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (dst_id, src_id, kind_s) = row?;
+                let dst_rec = match fetch_symbol(&self.conn, &SymbolId(dst_id))? {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let src_rec = match fetch_symbol(&self.conn, &SymbolId(src_id))? {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let bundle = bundles
+                    .values_mut()
+                    .find(|b| b.symbol.id == dst_rec.id)
+                    .expect("symbol_id matches a symbol in this file");
+                bundle.inbound.push(NeighborEdge {
+                    kind: EdgeKind::from_str(&kind_s).unwrap_or(EdgeKind::Calls),
+                    direction: Direction::In,
+                    src: src_rec,
+                    dst: Some(dst_rec),
+                    dst_unresolved: None,
+                });
+            }
+        }
+
+        Ok(bundles.into_values().collect())
     }
 
     pub fn importers_of_file(&self, file_path: &str) -> Result<Vec<SymbolRecord>> {

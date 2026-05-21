@@ -95,6 +95,16 @@ enum QueryCmd {
         #[arg(long)]
         index: PathBuf,
     },
+    /// All symbols in a file with their outbound + inbound edges.
+    EdgesByFile {
+        path: String,
+        #[arg(long)]
+        index: PathBuf,
+        #[arg(long, default_value = "")]
+        kind: String,
+        #[arg(long, default_value = "both")]
+        direction: String,
+    },
     /// Symbols whose file imports the given file path.
     ImportersOf {
         path: String,
@@ -225,6 +235,19 @@ fn to_request(cmd: QueryCmd) -> anyhow::Result<(std::path::PathBuf, QueryRequest
             },
         ),
         QueryCmd::SymbolsInFile { path, index } => (index, QueryRequest::SymbolsInFile { path }),
+        QueryCmd::EdgesByFile {
+            path,
+            index,
+            kind,
+            direction,
+        } => (
+            index,
+            QueryRequest::EdgesByFile {
+                path,
+                kinds: parse_kinds(&kind)?,
+                direction: Direction::from_str(&direction)?,
+            },
+        ),
         QueryCmd::ImportersOf { path, index } => (index, QueryRequest::ImportersOfFile { path }),
         QueryCmd::Files { index, prefix } => (index, QueryRequest::FilesAtPrefix { prefix }),
         QueryCmd::Metadata { index } => (index, QueryRequest::Metadata),
