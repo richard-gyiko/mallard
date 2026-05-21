@@ -7,6 +7,29 @@ description: Query a mallard repository index from the shell to anchor reasoning
 
 Background: [CONTEXT.md](../../../CONTEXT.md) defines domain terms (`Index`, `IndexReader`, `Symbol`, `Edge`, `ParsedSource`). [docs/specs/indexing/index-query.md](../../../docs/specs/indexing/index-query.md) is the read-primitive contract. [ADR-0007](../../../docs/decisions/0007-defer-retrieval-module-agents-compose-primitives.md) is why retrieval is agent-composed via this CLI rather than a built module.
 
+## Prereqs
+
+- `cargo` (to build mallard) or a prebuilt `mallard` binary on `$PATH`.
+- `jq` for JSON extraction in Bash, or PowerShell's `ConvertFrom-Json` instead.
+- `gh` only if pulling PR metadata (optional).
+
+## Running mallard
+
+Two equivalent ways to invoke; pick one and stick with it for a session.
+
+**Via cargo (development)**:
+```bash
+cargo run --quiet -- query <verb> ... 2>/dev/null
+```
+Always redirect stderr (`2>/dev/null` in bash, `2>$null` in PowerShell). Cargo writes incremental-compilation warnings to stderr that will corrupt JSON capture if you don't.
+
+**Via prebuilt binary (recommended for piping / scripts)**:
+```bash
+cargo build --release
+./target/release/mallard query <verb> ...
+```
+Clean stdout, no cargo noise, faster repeat calls. On Windows, run from PowerShell or cmd, not git-bash — the release binary fails under MSYS2's DLL loader (`STATUS_DLL_NOT_FOUND`).
+
 ## Invariants
 
 - Each `mallard query <verb>` opens the index, verifies `index_format_version`, runs one read, exits. No persistent server.
@@ -144,4 +167,5 @@ Multi-step recipes for diff blast radius and base/head PR-review chains live in 
 - **Constructor calls filtered out.** Rust tuple-struct / enum-variant constructors (`Ok(x)`, `Some(x)`, `SymbolId(s)`, scoped `QueryRequest::LookupSymbol(x)`) do **not** appear as `calls` edges per [ADR-0008](../../../docs/decisions/0008-heuristic-name-resolution.md). Don't hunt for `Ok` as a callee.
 - **Same qualified name in two files** → two distinct symbol IDs (file path is part of the hash). The resolver picks the unambiguous callable; ambiguous matches stay `dst_unresolved`.
 - **`findings` is empty without `--rules`** at index time. Rebuild with `--rules <yaml>` if you need them.
+- **Const / static / type-alias symbols carry no `calls` edges.** They aren't *called*, only *referenced* — and references aren't extracted today (per [ADR-0008](../../../docs/decisions/0008-heuristic-name-resolution.md)). Absence of edges on these kinds means "this is a non-callable definition", not "this is dead code".
 - **Git Bash on Windows mangles absolute paths.** `--index /foo/bar.duckdb` gets rewritten. Use relative paths or PowerShell.
