@@ -9,12 +9,7 @@ use crate::parsed_source::ParsedSource;
 /// (symbols + edges + parse errors). The seam where second-language support
 /// will slot in — see CONTEXT.md.
 pub trait SymbolExtractor: Send {
-    fn extract(
-        &mut self,
-        parsed: &ParsedSource,
-        file_id: FileId,
-        relative_path: &str,
-    ) -> ParsedFile;
+    fn extract(&mut self, parsed: &ParsedSource) -> ParsedFile;
 }
 
 const RUST_QUERY: &str = r#"
@@ -153,14 +148,11 @@ impl RustExtractor {
 }
 
 impl SymbolExtractor for RustExtractor {
-    fn extract(
-        &mut self,
-        parsed: &ParsedSource,
-        file_id: FileId,
-        relative_path: &str,
-    ) -> ParsedFile {
+    fn extract(&mut self, parsed: &ParsedSource) -> ParsedFile {
         let source = parsed.source().as_bytes();
         let root = parsed.ts_root();
+        let file_id = parsed.file_id();
+        let relative_path = parsed.relative_path();
 
         let mut parse_errors: Vec<ParseError> = Vec::new();
         if root.has_error() {

@@ -33,7 +33,7 @@ The output of a structural rule applied to a file. Carries `rule_id`, file, line
 _Avoid_: lint, violation, warning (those carry severity baggage mallard doesn't enforce yet).
 
 **ParsedSource**:
-One tree-sitter parse of a file, held in memory for the duration of a per-file pass. Shared by symbol extraction and rule matching so the same bytes aren't reparsed.
+One tree-sitter parse of a file, held in memory for the duration of a per-file pass. Shared by symbol extraction and rule matching so the same bytes aren't reparsed. Carries its file_id and relative_path so the **SymbolExtractor** trait takes a single argument.
 _Avoid_: AST, tree, parsed file.
 
 **FileProcessor**:

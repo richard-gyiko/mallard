@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::str::FromStr;
 
 use ast_grep_language::SupportLang;
@@ -12,16 +11,18 @@ use crate::rules::RuleSet;
 use crate::walk::WalkEntry;
 
 pub struct FileProcessor {
-    extractors: HashMap<SupportLang, Box<dyn SymbolExtractor>>,
+    rust: RustExtractor,
     rules: RuleSet,
 }
 
 impl FileProcessor {
     pub fn new(rules: RuleSet) -> Result<Self> {
-        let mut extractors: HashMap<SupportLang, Box<dyn SymbolExtractor>> = HashMap::new();
-        extractors.insert(SupportLang::Rust, Box::new(RustExtractor::new()?));
-        Ok(FileProcessor { extractors, rules })
+        Ok(FileProcessor {
+            rust: RustExtractor::new()?,
+            rules,
+        })
     }
+
 
     pub fn rule_set_hash(&self) -> Option<&str> {
         self.rules.source_hash.as_deref()
@@ -56,18 +57,21 @@ impl FileProcessor {
         let Some(lang) = lang else {
             return Ok(skipped(file_record, FileStatus::SkippedExtension));
         };
-        let Some(extractor) = self.extractors.get_mut(&lang) else {
-            return Ok(skipped(file_record, FileStatus::SkippedExtension));
+        // Today only Rust has a SymbolExtractor; second-language support lands here as
+        // an additional arm + an additional field on FileProcessor.
+        let extractor: &mut dyn SymbolExtractor = match lang {
+            SupportLang::Rust => &mut self.rust,
+            _ => return Ok(skipped(file_record, FileStatus::SkippedExtension)),
         };
 
-        let parsed_source = ParsedSource::parse(lang, source)?;
+        let parsed_source =
+            ParsedSource::parse(lang, file_id, entry.relative_path.clone(), source)?;
 
         let t_rules = std::time::Instant::now();
         let findings = self.rules.run(file_id, &parsed_source);
         let rules_ms = t_rules.elapsed().as_millis() as u64;
 
-        let parsed: ParsedFile =
-            extractor.extract(&parsed_source, file_id, &entry.relative_path);
+        let parsed: ParsedFile = extractor.extract(&parsed_source);
 
         let timing = FileTiming {
             path: entry.relative_path.clone(),
