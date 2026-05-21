@@ -78,6 +78,7 @@ pub fn build(req: BuildRequest) -> Result<BuildSummary> {
     info!(
         inspected = resolve_stats.inspected,
         resolved = resolve_stats.resolved,
+        ambiguous = resolve_stats.ambiguous,
         "edge resolution complete"
     );
 

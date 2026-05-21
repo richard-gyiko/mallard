@@ -172,6 +172,15 @@ For each changed symbol, decide whether to emit comments. Two channels:
 
 For every emitted comment, the spec ([docs/specs/pr-review/pull-request-review.md](../../../docs/specs/pr-review/pull-request-review.md)) requires citing the evidence: at minimum a symbol ID, optionally edge paths and rule IDs. Comments without citations must not be emitted.
 
+**Prioritise by edge confidence ([ADR-0010](../../../docs/decisions/0010-edge-confidence-tier.md)).** Every `NeighborEdge` and `UnresolvedCallerHit` now carries a `confidence` field:
+
+- **`extracted`** — parser resolved within the file. Highest trust; baseline anchor evidence.
+- **`inferred`** — post-build resolver matched cross-file via the unambiguous-callable rule. Solid but heuristic.
+- **`ambiguous`** — resolver saw multiple callable candidates and refused to pick. **Highest reviewer-priority signal** — the tool *almost* knew the answer; a human can disambiguate quickly. Surface these as bundled comments asking "verify which `<name>` this call targets".
+- **`unresolved`** — no candidate anywhere; almost always stdlib / external. **De-emphasise** in synthesis unless the body looks risky (e.g. sudden `unwrap`, `panic!`).
+
+Synthesis policy: when reasoning over the evidence in stage 5/6 outputs, sort edges by confidence priority — `ambiguous` first (highest signal-to-noise for human disambiguation), then `inferred` (solid cross-file evidence), then `extracted` (in-file, usually already understood), then `unresolved` (background noise unless suspicious). A 10-comment budget should over-index on ambiguous edges; treat them like deterministic-rule findings for trust calibration purposes.
+
 **Bundle by pattern when N changed symbols ≫ comment budget.** Refactor-shaped PRs routinely touch 20–50 symbols in mechanically uniform ways. Emitting one comment per symbol blows the budget and dilutes signal. Before generating per-symbol comments, group the changed-symbol set by **pattern**:
 
 - **Free-fn-to-method migration**: ≥3 `removed` free fns in one file with matching `added` methods on a new struct in the same file, plus modified-body call-site updates in callers. Emit **one bundled comment** describing the pattern: "9 free fns in `query.rs` moved to methods on the new `IndexReader` struct; all call sites updated; 0 orphan callers from stage 4.5." Cite the full set of affected symbol IDs at the end of the comment so a reviewer can drill in.

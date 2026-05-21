@@ -10,9 +10,9 @@ pub mod store;
 pub mod walk;
 
 pub use crate::core::{
-    Anchor, BuildRequest, BuildSummary, Counters, Edge, EdgeKind, FileId, FileRecord, FileStatus,
-    FileTiming, Finding, MallardError, Metadata, ParseError, ParsedFile, ProcessOutcome, Result,
-    Symbol, SymbolId, SymbolKind,
+    Anchor, BuildRequest, BuildSummary, Counters, Edge, EdgeConfidence, EdgeKind, FileId,
+    FileRecord, FileStatus, FileTiming, Finding, MallardError, Metadata, ParseError, ParsedFile,
+    ProcessOutcome, Result, Symbol, SymbolId, SymbolKind,
 };
 pub use crate::file_processor::FileProcessor;
 pub use crate::index::build;

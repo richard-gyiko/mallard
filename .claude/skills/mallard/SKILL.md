@@ -37,6 +37,7 @@ Clean stdout, no cargo noise, faster repeat calls. On Windows, run from PowerShe
 - `--index <path>` is required on every `query` subcommand.
 - Indexes are immutable per SHA. Two SHAs = two indexes; never edit in place.
 - Cross-file calls resolve heuristically per [ADR-0008](../../../docs/decisions/0008-heuristic-name-resolution.md). Stdlib / external crate calls stay `dst_unresolved` by design.
+- Every edge carries `confidence: extracted | inferred | ambiguous | unresolved` per [ADR-0010](../../../docs/decisions/0010-edge-confidence-tier.md). `ambiguous` surfaces previously-silent multi-match drops — high-priority for human disambiguation. `extracted` = intra-file resolved; `inferred` = post-build cross-file resolved; `unresolved` = no candidate found.
 
 ## Indexing
 
