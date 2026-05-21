@@ -222,6 +222,30 @@ fn missing_index_file_errors() {
 }
 
 #[test]
+fn cross_file_calls_resolve_after_build() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    // greet is defined in greet.rs and called from main.rs — exercises
+    // the post-write resolver.
+    let greet_id = find_symbol(&out, "greet.rs", "greet");
+    let reader = open_reader(&out);
+    let callers = reader
+        .neighbors(&greet_id, &[EdgeKind::Calls], Direction::In)
+        .unwrap();
+
+    let cross_file_caller = callers.iter().find(|e| {
+        e.src.path == "main.rs"
+            && e.dst.as_ref().map(|d| d.qualified_name == "greet").unwrap_or(false)
+    });
+    assert!(
+        cross_file_caller.is_some(),
+        "expected resolved cross-file call from main.rs into greet.rs::greet, got {callers:?}"
+    );
+}
+
+#[test]
 fn run_dispatches_query_request_metadata() {
     let tmp = TempDir::new().unwrap();
     let out = tmp.path().join("index.duckdb");
