@@ -113,7 +113,16 @@ impl RustExtractor {
             });
         }
 
+        // Filter out tuple-struct / enum-variant constructor calls. Rust's
+        // call_expression grammar can't distinguish `Ok(x)` (variant) from
+        // `f(x)` (function) without name resolution — heuristic: drop if the
+        // call name is a stdlib variant constructor, matches a same-file
+        // type definition, or is PascalCase with no same-file function /
+        // method / macro of the same name.
         for (node, name, kind) in references {
+            if kind == EdgeKind::Calls && is_constructor_call(&name, &symbols_by_name) {
+                continue;
+            }
             let enclosing = find_enclosing_definition(node, &symbols)
                 .map(|s| s.id.clone())
                 .unwrap_or_else(|| file_pseudo_src.clone());
@@ -295,6 +304,47 @@ fn compute_signature(def_node: Node, source: &[u8], kind: SymbolKind) -> String 
         }
     }
     String::new()
+}
+
+// Rust stdlib variant constructors callable with bare-identifier syntax.
+const STDLIB_VARIANT_CONSTRUCTORS: &[&str] = &["Ok", "Err", "Some", "None"];
+
+fn is_constructor_call(
+    name: &str,
+    symbols_by_name: &std::collections::HashMap<&str, &Symbol>,
+) -> bool {
+    if STDLIB_VARIANT_CONSTRUCTORS.contains(&name) {
+        return true;
+    }
+    if let Some(sym) = symbols_by_name.get(name) {
+        if matches!(
+            sym.kind,
+            SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::TypeAlias
+        ) {
+            return true;
+        }
+    }
+    // PascalCase identifiers that aren't a known callable in this file are very
+    // likely scoped variant constructors (e.g. `QueryRequest::LookupSymbol(x)`
+    // captures `LookupSymbol`). Rust functions and methods are snake_case by
+    // convention.
+    let pascal_case = name
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_uppercase())
+        .unwrap_or(false);
+    if pascal_case {
+        let is_known_callable = symbols_by_name.get(name).is_some_and(|sym| {
+            matches!(
+                sym.kind,
+                SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
+            )
+        });
+        if !is_known_callable {
+            return true;
+        }
+    }
+    false
 }
 
 fn canonical_params(text: String) -> String {
