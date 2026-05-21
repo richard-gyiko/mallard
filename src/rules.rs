@@ -3,10 +3,11 @@ use std::path::Path;
 use std::str::FromStr;
 
 use ast_grep_core::{Pattern, matcher::PatternError};
-use ast_grep_language::{LanguageExt, SupportLang};
+use ast_grep_language::SupportLang;
 use serde::Deserialize;
 
 use crate::core::{FileId, Finding, MallardError, Result, short_hash};
+use crate::parsed_source::ParsedSource;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleDef {
@@ -69,19 +70,11 @@ impl RuleSet {
         })
     }
 
-    pub fn run(&self, file_id: FileId, source: &[u8], language: &str) -> Vec<Finding> {
-        let Ok(lang) = SupportLang::from_str(language) else {
+    pub fn run(&self, file_id: FileId, parsed: &ParsedSource) -> Vec<Finding> {
+        let Some(rules) = self.by_language.get(&parsed.language()) else {
             return Vec::new();
         };
-        let Some(rules) = self.by_language.get(&lang) else {
-            return Vec::new();
-        };
-        let Ok(src) = std::str::from_utf8(source) else {
-            return Vec::new();
-        };
-
-        let ast = lang.ast_grep(src);
-        let root = ast.root();
+        let root = parsed.ast().root();
         let mut findings: Vec<Finding> = Vec::new();
         for rule in rules {
             for m in root.find_all(&rule.pattern) {
@@ -114,6 +107,10 @@ mod tests {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(yaml.as_bytes()).unwrap();
         f
+    }
+
+    fn parse_rust(src: &str) -> ParsedSource {
+        ParsedSource::parse(SupportLang::Rust, src).unwrap()
     }
 
     #[test]
@@ -161,8 +158,8 @@ rules:
 "#,
         );
         let rs = RuleSet::load(f.path()).unwrap();
-        let src = b"fn f() {\n    let v = thing.unwrap();\n}\n";
-        let findings = rs.run(7, src, "rust");
+        let parsed = parse_rust("fn f() {\n    let v = thing.unwrap();\n}\n");
+        let findings = rs.run(7, &parsed);
         assert_eq!(findings.len(), 1);
         let f0 = &findings[0];
         assert_eq!(f0.rule_id, "rust-unwrap");
@@ -186,8 +183,8 @@ rules:
 "#,
         );
         let rs = RuleSet::load(f.path()).unwrap();
-        let src = b"fn f() {\n    a.unwrap();\n    b.expect(\"x\");\n    c.unwrap();\n}\n";
-        let findings = rs.run(1, src, "rust");
+        let parsed = parse_rust("fn f() {\n    a.unwrap();\n    b.expect(\"x\");\n    c.unwrap();\n}\n");
+        let findings = rs.run(1, &parsed);
         let ids: Vec<&str> = findings.iter().map(|f| f.rule_id.as_str()).collect();
         let lines: Vec<u32> = findings.iter().map(|f| f.start_line).collect();
         assert_eq!(ids, vec!["rule-a", "rule-b", "rule-b"]);
@@ -195,8 +192,9 @@ rules:
     }
 
     #[test]
-    fn unknown_language_at_runtime_returns_empty() {
+    fn no_rules_for_language_returns_empty() {
         let rs = RuleSet::empty();
-        assert!(rs.run(1, b"x", "cobol").is_empty());
+        let parsed = parse_rust("fn f() {}\n");
+        assert!(rs.run(1, &parsed).is_empty());
     }
 }

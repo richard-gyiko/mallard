@@ -1,6 +1,7 @@
 pub mod core;
 pub mod file_processor;
 pub mod index;
+pub mod parsed_source;
 pub mod parser;
 pub mod query;
 pub mod rules;

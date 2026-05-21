@@ -1,6 +1,11 @@
+use std::str::FromStr;
+
+use ast_grep_language::SupportLang;
+
 use crate::core::{
-    FileId, FileRecord, FileStatus, FileTiming, ProcessOutcome, Result,
+    FileId, FileRecord, FileStatus, FileTiming, ParsedFile, ProcessOutcome, Result,
 };
+use crate::parsed_source::ParsedSource;
 use crate::parser::RustParser;
 use crate::rules::RuleSet;
 use crate::walk::WalkEntry;
@@ -40,14 +45,43 @@ impl FileProcessor {
             });
         }
 
-        let source = std::fs::read(&entry.path)?;
-        let language = entry.language.as_deref().unwrap_or_default();
+        let raw = std::fs::read(&entry.path)?;
+        let Ok(source) = std::str::from_utf8(&raw) else {
+            return Ok(ProcessOutcome {
+                file_record: FileRecord {
+                    status: FileStatus::SkippedBinary,
+                    ..file_record
+                },
+                parsed: None,
+                findings: Vec::new(),
+                timing: None,
+            });
+        };
+        let lang = entry
+            .language
+            .as_deref()
+            .and_then(|l| SupportLang::from_str(l).ok());
+        let Some(lang) = lang else {
+            return Ok(ProcessOutcome {
+                file_record: FileRecord {
+                    status: FileStatus::SkippedExtension,
+                    ..file_record
+                },
+                parsed: None,
+                findings: Vec::new(),
+                timing: None,
+            });
+        };
+
+        let parsed_source = ParsedSource::parse(lang, source)?;
 
         let t_rules = std::time::Instant::now();
-        let findings = self.rules.run(file_id, &source, language);
+        let findings = self.rules.run(file_id, &parsed_source);
         let rules_ms = t_rules.elapsed().as_millis() as u64;
 
-        let parsed = self.parser.parse_file(file_id, &entry.relative_path, &source)?;
+        let parsed: ParsedFile =
+            self.parser
+                .extract_from(&parsed_source, file_id, &entry.relative_path);
 
         let timing = FileTiming {
             path: entry.relative_path.clone(),
