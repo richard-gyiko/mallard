@@ -37,8 +37,12 @@ One tree-sitter parse of a file, held in memory for the duration of a per-file p
 _Avoid_: AST, tree, parsed file.
 
 **FileProcessor**:
-The per-file pipeline. Holds a **ParsedSource**, dispatches the language-appropriate symbol extractor and rule matcher, records timing and parse errors. The dispatch seam for languages lives behind its interface.
+The per-file pipeline. Holds a **ParsedSource**, dispatches the language-appropriate **SymbolExtractor** + rule matcher, records timing and parse errors. The dispatch seam for languages lives behind its interface.
 _Avoid_: pipeline, handler, processor (the bare word).
+
+**SymbolExtractor**:
+Per-language adapter. Turns a **ParsedSource** into the `ParsedFile` for that file — **Symbol**s, **Edge**s, parse errors. One impl per supported language (today: `RustExtractor`); **FileProcessor** picks the right one by `ParsedSource::language()`.
+_Avoid_: parser, visitor, extractor (the bare word).
 
 **QueryRequest** / **QueryResult**:
 The request/response shape crossing the query seam. CLI marshals argv into a `QueryRequest`; future adapters (MCP, HTTP) do the same. Hidden from callers: SQL, row mapping, connection lifecycle.
