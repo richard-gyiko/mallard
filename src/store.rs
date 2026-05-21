@@ -16,6 +16,13 @@ use crate::schema::{self, cols, metadata_keys, tables};
 pub struct ResolveStats {
     pub inspected: u64,
     pub resolved: u64,
+    pub ambiguous: u64,
+}
+
+enum Match {
+    Unique(String),
+    Ambiguous,
+    None,
 }
 
 pub struct IndexWriter {
@@ -123,6 +130,7 @@ impl IndexWriter {
                 cols::edges::DST_SYMBOL_ID,
                 cols::edges::DST_UNRESOLVED,
                 cols::edges::KIND,
+                cols::edges::CONFIDENCE,
                 cols::edges::FILE_ID,
             ],
         )?;
@@ -132,6 +140,7 @@ impl IndexWriter {
                 edge.dst.as_ref().map(|d| d.as_str()),
                 edge.dst_unresolved.as_deref(),
                 edge.kind.as_str(),
+                edge.confidence.as_str(),
                 edge.file_id,
             ])?;
         }
@@ -232,15 +241,20 @@ impl IndexWriter {
         }
 
         let mut resolutions: Vec<(i64, String)> = Vec::new();
+        let mut ambiguous: Vec<i64> = Vec::new();
         for (edge_id, name) in &pending {
-            if let Some(sid) = pick_callable(by_qualified.get(name).map(Vec::as_slice))
-                .or_else(|| pick_callable(by_short.get(name).map(Vec::as_slice)))
-            {
-                resolutions.push((*edge_id, sid));
+            match classify_match(
+                by_qualified.get(name).map(Vec::as_slice),
+                by_short.get(name).map(Vec::as_slice),
+            ) {
+                Match::Unique(sid) => resolutions.push((*edge_id, sid)),
+                Match::Ambiguous => ambiguous.push(*edge_id),
+                Match::None => {}
             }
         }
 
         let resolved = resolutions.len() as u64;
+        let ambiguous_count = ambiguous.len() as u64;
         if !resolutions.is_empty() {
             self.conn.execute_batch(
                 "CREATE TEMPORARY TABLE _edge_resolutions (edge_id BIGINT, resolved_id VARCHAR)",
@@ -253,16 +267,35 @@ impl IndexWriter {
                 app.flush()?;
             }
             self.conn.execute(
-                "UPDATE edges SET dst_symbol_id = r.resolved_id, dst_unresolved = NULL \
+                "UPDATE edges SET dst_symbol_id = r.resolved_id, dst_unresolved = NULL, \
+                                  confidence = 'inferred' \
                  FROM _edge_resolutions r WHERE edges.edge_id = r.edge_id",
                 [],
             )?;
             self.conn.execute_batch("DROP TABLE _edge_resolutions")?;
         }
+        if !ambiguous.is_empty() {
+            self.conn
+                .execute_batch("CREATE TEMPORARY TABLE _edge_ambiguous (edge_id BIGINT)")?;
+            {
+                let mut app = self.conn.appender("_edge_ambiguous")?;
+                for eid in &ambiguous {
+                    app.append_row(params![*eid])?;
+                }
+                app.flush()?;
+            }
+            self.conn.execute(
+                "UPDATE edges SET confidence = 'ambiguous' \
+                 FROM _edge_ambiguous a WHERE edges.edge_id = a.edge_id",
+                [],
+            )?;
+            self.conn.execute_batch("DROP TABLE _edge_ambiguous")?;
+        }
 
         Ok(ResolveStats {
             inspected: pending.len() as u64,
             resolved,
+            ambiguous: ambiguous_count,
         })
     }
 
@@ -278,18 +311,28 @@ impl IndexWriter {
     }
 }
 
-fn pick_callable(candidates: Option<&[(String, SymbolKind)]>) -> Option<String> {
+fn classify_match(
+    qualified: Option<&[(String, SymbolKind)]>,
+    short: Option<&[(String, SymbolKind)]>,
+) -> Match {
+    if let Some(m) = pick_callable_match(qualified) {
+        return m;
+    }
+    pick_callable_match(short).unwrap_or(Match::None)
+}
+
+fn pick_callable_match(candidates: Option<&[(String, SymbolKind)]>) -> Option<Match> {
     let candidates = candidates?;
     let callables: Vec<&String> = candidates
         .iter()
         .filter(|(_, k)| matches!(k, SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro))
         .map(|(s, _)| s)
         .collect();
-    if callables.len() == 1 {
-        Some(callables[0].clone())
-    } else {
-        None
-    }
+    Some(match callables.len() {
+        0 => return None,
+        1 => Match::Unique(callables[0].clone()),
+        _ => Match::Ambiguous,
+    })
 }
 
 fn tmp_path_for(final_path: &Path) -> PathBuf {

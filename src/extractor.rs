@@ -1,7 +1,8 @@
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 use crate::core::{
-    Anchor, Edge, EdgeKind, FileId, ParseError, ParsedFile, Result, Symbol, SymbolId, SymbolKind,
+    Anchor, Edge, EdgeConfidence, EdgeKind, FileId, ParseError, ParsedFile, Result, Symbol,
+    SymbolId, SymbolKind,
 };
 use crate::parsed_source::ParsedSource;
 
@@ -108,6 +109,7 @@ impl RustExtractor {
                 dst: Some(sym.id.clone()),
                 dst_unresolved: None,
                 kind: EdgeKind::Contains,
+                confidence: EdgeConfidence::Extracted,
                 file_id,
                 order_key: sym.anchor.start_byte,
             });
@@ -127,12 +129,17 @@ impl RustExtractor {
                 .map(|s| s.id.clone())
                 .unwrap_or_else(|| file_pseudo_src.clone());
             let dst = symbols_by_name.get(name.as_str()).map(|s| s.id.clone());
-            let dst_unresolved = if dst.is_none() { Some(name.clone()) } else { None };
+            let (dst_unresolved, confidence) = if dst.is_some() {
+                (None, EdgeConfidence::Extracted)
+            } else {
+                (Some(name.clone()), EdgeConfidence::Unresolved)
+            };
             edges.push(Edge {
                 src: enclosing,
                 dst,
                 dst_unresolved,
                 kind,
+                confidence,
                 file_id,
                 order_key: node.start_byte() as u64,
             });
@@ -144,6 +151,7 @@ impl RustExtractor {
                 dst: None,
                 dst_unresolved: Some(import_text),
                 kind: EdgeKind::Imports,
+                confidence: EdgeConfidence::Unresolved,
                 file_id,
                 order_key: node.start_byte() as u64,
             });

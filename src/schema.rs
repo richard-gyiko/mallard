@@ -1,4 +1,4 @@
-pub const INDEX_FORMAT_VERSION: u32 = 1;
+pub const INDEX_FORMAT_VERSION: u32 = 2;
 
 pub const DDL: &str = r#"
 CREATE TABLE files (
@@ -28,6 +28,7 @@ CREATE TABLE edges (
     dst_symbol_id  VARCHAR,
     dst_unresolved VARCHAR,
     kind           VARCHAR NOT NULL,
+    confidence     VARCHAR NOT NULL,
     file_id        BIGINT NOT NULL
 );
 
@@ -89,6 +90,7 @@ pub mod cols {
         pub const DST_SYMBOL_ID: &str = "dst_symbol_id";
         pub const DST_UNRESOLVED: &str = "dst_unresolved";
         pub const KIND: &str = "kind";
+        pub const CONFIDENCE: &str = "confidence";
         pub const FILE_ID: &str = "file_id";
     }
 

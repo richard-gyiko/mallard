@@ -5,7 +5,8 @@ use duckdb::{Connection, OptionalExt, params};
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    Anchor, EdgeKind, FileId, FileStatus, MallardError, Result, SymbolId, SymbolKind,
+    Anchor, EdgeConfidence, EdgeKind, FileId, FileStatus, MallardError, Result, SymbolId,
+    SymbolKind,
 };
 use crate::schema::{self, cols, metadata_keys, tables};
 
@@ -43,6 +44,7 @@ pub struct SymbolRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NeighborEdge {
     pub kind: EdgeKind,
+    pub confidence: EdgeConfidence,
     pub direction: Direction,
     pub src: SymbolRecord,
     pub dst: Option<SymbolRecord>,
@@ -106,10 +108,13 @@ pub struct FileEdgeBundle {
 /// One unresolved-edge match for the deletion-sanity scan. Surfaces a call
 /// site in the index that references a name that didn't resolve to any
 /// symbol — useful for spotting orphan callers of symbols removed in a PR.
+/// `confidence` distinguishes truly-unresolved (typically stdlib/external)
+/// from ambiguous-name cases the resolver refused to pick.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnresolvedCallerHit {
     pub unresolved_name: String,
     pub edge_kind: EdgeKind,
+    pub confidence: EdgeConfidence,
     pub caller: SymbolRecord,
 }
 
@@ -525,7 +530,7 @@ impl IndexReader {
         let placeholders = vec!["?"; kinds.len()].join(",");
         let sql = format!(
             "SELECT s.symbol_id, \
-                    e.kind, e.dst_symbol_id, e.dst_unresolved, e.edge_id, \
+                    e.kind, e.confidence, e.dst_symbol_id, e.dst_unresolved, \
                     dst.symbol_id, dst.file_id, dst_f.path, dst.qualified_name, dst.kind, dst.signature, \
                     dst.anchor_start_byte, dst.anchor_end_byte, dst.anchor_start_line, dst.anchor_end_line \
              FROM symbols s \
@@ -542,15 +547,15 @@ impl IndexReader {
             params.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
         let rows = stmt.query_map(p_refs.as_slice(), |r| {
             Ok((
-                r.get::<_, String>(0)?,        // src symbol_id
-                r.get::<_, String>(1)?,        // edge kind
-                r.get::<_, Option<String>>(2)?, // dst symbol_id (resolved)
-                r.get::<_, Option<String>>(3)?, // dst_unresolved
+                r.get::<_, String>(0)?,         // src symbol_id
+                r.get::<_, String>(1)?,         // edge kind
+                r.get::<_, String>(2)?,         // confidence
+                r.get::<_, Option<String>>(4)?, // dst_unresolved
                 read_optional_symbol(r, 5)?,
             ))
         })?;
         for row in rows {
-            let (src_id, kind_s, _dst_sid, dst_unresolved, dst_rec) = row?;
+            let (src_id, kind_s, conf_s, dst_unresolved, dst_rec) = row?;
             let src_id = SymbolId(src_id);
             let src_rec = match bundles.get(&src_id) {
                 Some(b) => b.symbol.clone(),
@@ -561,6 +566,8 @@ impl IndexReader {
                 .expect("symbol_id matches a bundle in this file");
             bundle.outbound.push(NeighborEdge {
                 kind: EdgeKind::from_str(&kind_s).unwrap_or(EdgeKind::Calls),
+                confidence: EdgeConfidence::from_str(&conf_s)
+                    .unwrap_or(EdgeConfidence::Unresolved),
                 direction: Direction::Out,
                 src: src_rec,
                 dst: dst_rec,
@@ -579,7 +586,7 @@ impl IndexReader {
         let placeholders = vec!["?"; kinds.len()].join(",");
         let sql = format!(
             "SELECT s.symbol_id, \
-                    e.kind, \
+                    e.kind, e.confidence, \
                     src.symbol_id, src.file_id, src_f.path, src.qualified_name, src.kind, src.signature, \
                     src.anchor_start_byte, src.anchor_end_byte, src.anchor_start_line, src.anchor_end_line \
              FROM symbols s \
@@ -598,11 +605,12 @@ impl IndexReader {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                read_required_symbol(r, 2)?,
+                r.get::<_, String>(2)?,
+                read_required_symbol(r, 3)?,
             ))
         })?;
         for row in rows {
-            let (dst_id, kind_s, src_rec) = row?;
+            let (dst_id, kind_s, conf_s, src_rec) = row?;
             let dst_id = SymbolId(dst_id);
             let dst_rec = match bundles.get(&dst_id) {
                 Some(b) => b.symbol.clone(),
@@ -613,6 +621,8 @@ impl IndexReader {
                 .expect("symbol_id matches a bundle in this file");
             bundle.inbound.push(NeighborEdge {
                 kind: EdgeKind::from_str(&kind_s).unwrap_or(EdgeKind::Calls),
+                confidence: EdgeConfidence::from_str(&conf_s)
+                    .unwrap_or(EdgeConfidence::Unresolved),
                 direction: Direction::In,
                 src: src_rec,
                 dst: Some(dst_rec),
@@ -642,7 +652,7 @@ impl IndexReader {
         let name_placeholders = vec!["?"; names.len()].join(",");
         let kind_placeholders = vec!["?"; kinds.len()].join(",");
         let sql = format!(
-            "SELECT e.dst_unresolved, e.kind, \
+            "SELECT e.dst_unresolved, e.kind, e.confidence, \
                     src.symbol_id, src.file_id, sf.path, src.qualified_name, src.kind, src.signature, \
                     src.anchor_start_byte, src.anchor_end_byte, src.anchor_start_line, src.anchor_end_line \
              FROM edges e \
@@ -663,7 +673,9 @@ impl IndexReader {
                 unresolved_name: r.get::<_, String>(0)?,
                 edge_kind: EdgeKind::from_str(&r.get::<_, String>(1)?)
                     .unwrap_or(EdgeKind::Calls),
-                caller: read_required_symbol(r, 2)?,
+                confidence: EdgeConfidence::from_str(&r.get::<_, String>(2)?)
+                    .unwrap_or(EdgeConfidence::Unresolved),
+                caller: read_required_symbol(r, 3)?,
             })
         })?;
         let mut out = Vec::new();
@@ -846,29 +858,26 @@ fn neighbors_inner(
 
     for (col, direction) in active {
         let sql = format!(
-            "SELECT e.src_symbol_id, e.dst_symbol_id, e.dst_unresolved, e.kind \
+            "SELECT e.src_symbol_id, e.dst_symbol_id, e.dst_unresolved, e.kind, e.confidence \
              FROM edges e \
              WHERE e.{col} = ? AND e.kind IN ({placeholders}) \
              ORDER BY e.edge_id"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let mut p: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(kinds.len() + 1);
-        p.push(Box::new(id.as_str().to_string()));
-        for k in kinds {
-            p.push(Box::new(k.as_str().to_string()));
-        }
+        let params = bind_strings_and_kinds(&[id.as_str()], kinds);
         let p_refs: Vec<&dyn duckdb::ToSql> =
-            p.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
+            params.iter().map(|b| &**b as &dyn duckdb::ToSql).collect();
         let rows = stmt.query_map(p_refs.as_slice(), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
             ))
         })?;
         for row in rows {
-            let (src, dst, unresolved, kind_s) = row?;
+            let (src, dst, unresolved, kind_s, conf_s) = row?;
             let Some(src_rec) = fetch_symbol(conn, &SymbolId(src))? else {
                 continue;
             };
@@ -878,6 +887,7 @@ fn neighbors_inner(
             };
             out.push(NeighborEdge {
                 kind: EdgeKind::from_str(&kind_s).unwrap_or(EdgeKind::Calls),
+                confidence: EdgeConfidence::from_str(&conf_s).unwrap_or(EdgeConfidence::Unresolved),
                 direction: *direction,
                 src: src_rec,
                 dst: dst_rec,

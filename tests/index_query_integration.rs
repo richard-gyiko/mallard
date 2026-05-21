@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use duckdb::Connection;
 use mallard::{
-    BuildRequest, Direction, EdgeKind, FindingFilter, IndexReader, MallardError, QueryRequest,
-    QueryResult, SymbolId, build,
+    BuildRequest, Direction, EdgeConfidence, EdgeKind, FindingFilter, IndexReader, MallardError,
+    QueryRequest, QueryResult, SymbolId, build,
 };
 use tempfile::TempDir;
 
@@ -55,7 +55,7 @@ fn metadata_returns_sha_and_format_version() {
 
     let meta = open_reader(&out).metadata().unwrap();
     assert_eq!(meta.sha.as_deref(), Some("deadbeefcafe"));
-    assert_eq!(meta.index_format_version, 1);
+    assert_eq!(meta.index_format_version, 2);
     assert!(meta.indexer_version.is_some());
     assert!(meta.rule_set_hash.is_some());
     assert_eq!(meta.language_allow_list, vec!["rust".to_string()]);
@@ -293,6 +293,44 @@ fn edges_by_file_preserves_symbols_with_zero_edges() {
 }
 
 #[test]
+fn neighbors_carry_edge_confidence() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    // bump → double is an intra-file resolution → extracted.
+    let bump = find_symbol(&out, "lib.rs", "Counter::bump");
+    let edges = open_reader(&out)
+        .neighbors(&bump, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+    let to_double = edges
+        .iter()
+        .find(|e| {
+            e.dst.as_ref().map(|d| d.qualified_name == "double").unwrap_or(false)
+        })
+        .expect("bump → double edge present");
+    assert_eq!(to_double.confidence, EdgeConfidence::Extracted);
+}
+
+#[test]
+fn cross_file_resolved_edges_are_inferred() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    // main → greet is a cross-file call resolved by the post-build pass.
+    let greet = find_symbol(&out, "greet.rs", "greet");
+    let callers = open_reader(&out)
+        .neighbors(&greet, &[EdgeKind::Calls], Direction::In)
+        .unwrap();
+    let cross_file = callers
+        .iter()
+        .find(|e| e.src.path == "main.rs")
+        .expect("main.rs caller present");
+    assert_eq!(cross_file.confidence, EdgeConfidence::Inferred);
+}
+
+#[test]
 fn unresolved_callers_unknown_name_returns_empty() {
     let tmp = TempDir::new().unwrap();
     let out = tmp.path().join("index.duckdb");
@@ -400,7 +438,7 @@ fn version_mismatch_is_explicit() {
     match err {
         MallardError::VersionMismatch { found, expected } => {
             assert_eq!(found, 99);
-            assert_eq!(expected, 1);
+            assert_eq!(expected, 2);
         }
         other => panic!("expected VersionMismatch, got {other:?}"),
     }

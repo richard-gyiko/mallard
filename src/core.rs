@@ -103,6 +103,48 @@ pub enum EdgeKind {
     TestedBy,
 }
 
+/// Per [ADR-0010](../../docs/decisions/0010-edge-confidence-tier.md):
+/// - `Extracted` — resolved within the file at parse time.
+/// - `Inferred` — resolved by the post-build cross-file resolver.
+/// - `Ambiguous` — multiple callable candidates; resolver refused to pick.
+/// - `Unresolved` — no candidate anywhere (typically stdlib / external).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeConfidence {
+    Extracted,
+    Inferred,
+    Ambiguous,
+    Unresolved,
+}
+
+impl EdgeConfidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EdgeConfidence::Extracted => "extracted",
+            EdgeConfidence::Inferred => "inferred",
+            EdgeConfidence::Ambiguous => "ambiguous",
+            EdgeConfidence::Unresolved => "unresolved",
+        }
+    }
+}
+
+impl FromStr for EdgeConfidence {
+    type Err = MallardError;
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "extracted" => EdgeConfidence::Extracted,
+            "inferred" => EdgeConfidence::Inferred,
+            "ambiguous" => EdgeConfidence::Ambiguous,
+            "unresolved" => EdgeConfidence::Unresolved,
+            _ => {
+                return Err(MallardError::MalformedRow(format!(
+                    "unknown edge confidence {s:?}"
+                )));
+            }
+        })
+    }
+}
+
 impl EdgeKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -163,6 +205,7 @@ pub struct Edge {
     pub dst: Option<SymbolId>,
     pub dst_unresolved: Option<String>,
     pub kind: EdgeKind,
+    pub confidence: EdgeConfidence,
     pub file_id: FileId,
     pub order_key: u64,
 }
