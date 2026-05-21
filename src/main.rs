@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use mallard::{
-    BuildRequest, Direction, EdgeKind, FindingFilter, SymbolId, build, query,
+    BuildRequest, Direction, EdgeKind, FindingFilter, IndexReader, SymbolId, build,
 };
 
 #[derive(Parser, Debug)]
@@ -175,7 +175,7 @@ fn print<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
 fn run_query(args: QueryArgs) -> anyhow::Result<()> {
     match args.sub {
         QueryCmd::Symbol { id, index } => {
-            let out = query::lookup_symbol(&index, &SymbolId(id))?;
+            let out = IndexReader::open(&index)?.lookup_symbol(&SymbolId(id))?;
             print(&out)
         }
         QueryCmd::Neighbors {
@@ -186,7 +186,7 @@ fn run_query(args: QueryArgs) -> anyhow::Result<()> {
         } => {
             let kinds = parse_kinds(&kind)?;
             let dir = Direction::from_str(&direction)?;
-            let out = query::neighbors(&index, &SymbolId(id), &kinds, dir)?;
+            let out = IndexReader::open(&index)?.neighbors(&SymbolId(id), &kinds, dir)?;
             print(&out)
         }
         QueryCmd::Expand {
@@ -198,7 +198,7 @@ fn run_query(args: QueryArgs) -> anyhow::Result<()> {
         } => {
             let kinds = parse_kinds(&kind)?;
             let dir = Direction::from_str(&direction)?;
-            let out = query::expand(&index, &SymbolId(id), depth, &kinds, dir)?;
+            let out = IndexReader::open(&index)?.expand(&SymbolId(id), depth, &kinds, dir)?;
             print(&out)
         }
         QueryCmd::Findings {
@@ -212,23 +212,23 @@ fn run_query(args: QueryArgs) -> anyhow::Result<()> {
                 path_prefix,
                 symbol_id: symbol_id.map(SymbolId),
             };
-            let out = query::findings(&index, filter)?;
+            let out = IndexReader::open(&index)?.findings(filter)?;
             print(&out)
         }
         QueryCmd::SymbolsInFile { path, index } => {
-            let out = query::symbols_in_file(&index, &path)?;
+            let out = IndexReader::open(&index)?.symbols_in_file(&path)?;
             print(&out)
         }
         QueryCmd::ImportersOf { path, index } => {
-            let out = query::importers_of_file(&index, &path)?;
+            let out = IndexReader::open(&index)?.importers_of_file(&path)?;
             print(&out)
         }
         QueryCmd::Files { index, prefix } => {
-            let out = query::files_at_prefix(&index, &prefix)?;
+            let out = IndexReader::open(&index)?.files_at_prefix(&prefix)?;
             print(&out)
         }
         QueryCmd::Metadata { index } => {
-            let out = query::metadata(&index)?;
+            let out = IndexReader::open(&index)?.metadata()?;
             print(&out)
         }
     }
