@@ -74,6 +74,13 @@ pub fn build(req: BuildRequest) -> Result<BuildSummary> {
         }
     }
 
+    let resolve_stats = writer.resolve_edges()?;
+    info!(
+        inspected = resolve_stats.inspected,
+        resolved = resolve_stats.resolved,
+        "edge resolution complete"
+    );
+
     writer.finalize()?;
 
     for kind in EDGE_KINDS_FOR_COUNTERS {

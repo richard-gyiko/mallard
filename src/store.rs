@@ -1,12 +1,22 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use duckdb::{Connection, params};
 
+use std::str::FromStr;
+
 use crate::core::{
     Anchor, Edge, FileId, FileRecord, Finding, Metadata, MallardError, ParseError, ParsedFile,
-    Result, Symbol,
+    Result, Symbol, SymbolKind,
 };
 use crate::schema::{self, cols, metadata_keys, tables};
+
+/// Counts produced by post-write resolution. Logged by the caller.
+#[derive(Debug, Clone, Default)]
+pub struct ResolveStats {
+    pub inspected: u64,
+    pub resolved: u64,
+}
 
 pub struct IndexWriter {
     conn: Connection,
@@ -173,6 +183,89 @@ impl IndexWriter {
         Ok(())
     }
 
+    /// Resolve `dst_unresolved` on `calls` edges by matching against
+    /// the global symbol name table. Among candidates with the same
+    /// name, callable kinds (Function / Method / Macro) win; if exactly
+    /// one callable matches a name, that's the resolution. Otherwise
+    /// the edge stays unresolved.
+    pub fn resolve_edges(&mut self) -> Result<ResolveStats> {
+        let mut by_qualified: HashMap<String, Vec<(String, SymbolKind)>> = HashMap::new();
+        let mut by_short: HashMap<String, Vec<(String, SymbolKind)>> = HashMap::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT symbol_id, qualified_name, kind FROM symbols")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (sid, qname, kind_str) = row?;
+                let kind = SymbolKind::from_str(&kind_str).unwrap_or(SymbolKind::Other);
+                by_qualified
+                    .entry(qname.clone())
+                    .or_default()
+                    .push((sid.clone(), kind));
+                let short = qname
+                    .rsplit_once("::")
+                    .map(|(_, s)| s.to_string())
+                    .unwrap_or(qname);
+                by_short.entry(short).or_default().push((sid, kind));
+            }
+        }
+
+        let mut pending: Vec<(i64, String)> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT edge_id, dst_unresolved FROM edges \
+                 WHERE dst_symbol_id IS NULL AND dst_unresolved IS NOT NULL AND kind = 'calls'",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                pending.push(row?);
+            }
+        }
+
+        let mut resolutions: Vec<(i64, String)> = Vec::new();
+        for (edge_id, name) in &pending {
+            if let Some(sid) = pick_callable(by_qualified.get(name))
+                .or_else(|| pick_callable(by_short.get(name)))
+            {
+                resolutions.push((*edge_id, sid));
+            }
+        }
+
+        let resolved = resolutions.len() as u64;
+        if !resolutions.is_empty() {
+            self.conn.execute_batch(
+                "CREATE TEMPORARY TABLE _edge_resolutions (edge_id BIGINT, resolved_id VARCHAR)",
+            )?;
+            {
+                let mut app = self.conn.appender("_edge_resolutions")?;
+                for (eid, sid) in &resolutions {
+                    app.append_row(params![*eid, sid.as_str()])?;
+                }
+                app.flush()?;
+            }
+            self.conn.execute(
+                "UPDATE edges SET dst_symbol_id = r.resolved_id, dst_unresolved = NULL \
+                 FROM _edge_resolutions r WHERE edges.edge_id = r.edge_id",
+                [],
+            )?;
+            self.conn.execute_batch("DROP TABLE _edge_resolutions")?;
+        }
+
+        Ok(ResolveStats {
+            inspected: pending.len() as u64,
+            resolved,
+        })
+    }
+
     pub fn finalize(self) -> Result<()> {
         self.conn.close().map_err(|(_, e)| MallardError::DuckDb(e))?;
         match std::fs::remove_file(&self.final_path) {
@@ -182,6 +275,20 @@ impl IndexWriter {
         }
         std::fs::rename(&self.tmp_path, &self.final_path)?;
         Ok(())
+    }
+}
+
+fn pick_callable(candidates: Option<&Vec<(String, SymbolKind)>>) -> Option<String> {
+    let candidates = candidates?;
+    let callables: Vec<&String> = candidates
+        .iter()
+        .filter(|(_, k)| matches!(k, SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro))
+        .map(|(s, _)| s)
+        .collect();
+    if callables.len() == 1 {
+        Some(callables[0].clone())
+    } else {
+        None
     }
 }
 
