@@ -5,6 +5,13 @@ use crate::core::{
 };
 use crate::parsed_source::ParsedSource;
 
+/// Per-language adapter that turns a `ParsedSource` into a `ParsedFile`
+/// (symbols + edges + parse errors). The seam where second-language support
+/// will slot in — see CONTEXT.md.
+pub trait SymbolExtractor: Send {
+    fn extract(&mut self, parsed: &ParsedSource) -> ParsedFile;
+}
+
 const RUST_QUERY: &str = r#"
 (function_item name: (identifier) @def.function.name) @def.function
 
@@ -33,50 +40,22 @@ const RUST_QUERY: &str = r#"
 (use_declaration) @import.decl
 "#;
 
-pub struct RustParser {
+pub struct RustExtractor {
     query: Query,
     cursor: QueryCursor,
 }
 
-impl RustParser {
+impl RustExtractor {
     pub fn new() -> Result<Self> {
         let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
         let query = Query::new(&language, RUST_QUERY)?;
-        Ok(RustParser {
+        Ok(RustExtractor {
             query,
             cursor: QueryCursor::new(),
         })
     }
 
-    pub fn extract_from(
-        &mut self,
-        parsed: &ParsedSource,
-        file_id: FileId,
-        relative_path: &str,
-    ) -> ParsedFile {
-        let source = parsed.source().as_bytes();
-        let root = parsed.ts_root();
-
-        let mut parse_errors: Vec<ParseError> = Vec::new();
-        if root.has_error() {
-            collect_errors(root, source, file_id, &mut parse_errors);
-        }
-
-        let t_query = std::time::Instant::now();
-        let (symbols, edges) = self.extract(root, source, file_id, relative_path);
-        let query_ms = t_query.elapsed().as_millis() as u64;
-
-        ParsedFile {
-            file_id,
-            symbols,
-            edges,
-            parse_errors,
-            parse_ms: parsed.parse_ms,
-            query_ms,
-        }
-    }
-
-    fn extract(
+    fn run_query(
         &mut self,
         root: Node<'_>,
         source: &[u8],
@@ -165,6 +144,33 @@ impl RustParser {
         edges.sort_by_key(|e| (e.kind.as_str(), e.order_key));
 
         (symbols, edges)
+    }
+}
+
+impl SymbolExtractor for RustExtractor {
+    fn extract(&mut self, parsed: &ParsedSource) -> ParsedFile {
+        let source = parsed.source().as_bytes();
+        let root = parsed.ts_root();
+        let file_id = parsed.file_id();
+        let relative_path = parsed.relative_path();
+
+        let mut parse_errors: Vec<ParseError> = Vec::new();
+        if root.has_error() {
+            collect_errors(root, source, file_id, &mut parse_errors);
+        }
+
+        let t_query = std::time::Instant::now();
+        let (symbols, edges) = self.run_query(root, source, file_id, relative_path);
+        let query_ms = t_query.elapsed().as_millis() as u64;
+
+        ParsedFile {
+            file_id,
+            symbols,
+            edges,
+            parse_errors,
+            parse_ms: parsed.parse_ms,
+            query_ms,
+        }
     }
 }
 

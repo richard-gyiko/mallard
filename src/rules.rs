@@ -110,7 +110,7 @@ mod tests {
     }
 
     fn parse_rust(src: &str) -> ParsedSource {
-        ParsedSource::parse(SupportLang::Rust, src).unwrap()
+        ParsedSource::parse(SupportLang::Rust, 0, String::new(), src).unwrap()
     }
 
     #[test]
