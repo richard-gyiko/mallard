@@ -1,0 +1,9 @@
+rules:
+  - id: rust-format-macro
+    language: rust
+    pattern: "format!($$$ARGS)"
+    message: "format! call — review formatting site."
+  - id: rust-println-macro
+    language: rust
+    pattern: "println!($$$ARGS)"
+    message: "println! call — replace with logging for non-CLI code."

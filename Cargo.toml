@@ -15,6 +15,7 @@ path = "src/main.rs"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 ast-grep-core = "0.42"
+ast-grep-language = "0.42"
 duckdb = "=1.10502.0"
 walkdir = "2"
 clap = { version = "4", features = ["derive"] }
