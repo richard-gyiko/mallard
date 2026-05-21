@@ -1,5 +1,7 @@
 # Pull-request review
 
+> **Architecture pattern**: see [ADR-0009](../../decisions/0009-pr-review-architecture-pattern.md). The wedge is a layered pipeline (selective retrieval → deterministic analyzers → LLM synthesis → severity-calibrated output → project memory), framed as a *first-pass assistant with human oversight*, not a merge gate. Retrieval is composed by the agent via `mallard query` primitives per [ADR-0007](../../decisions/0007-defer-retrieval-module-agents-compose-primitives.md).
+
 ## Purpose
 
 Produce an architectural review of a pull request: comments grounded in what the diff touches, what it depends on, what it likely breaks, and which structural rules it violates. Comments are evidence-backed by the repository graph, not free-form LLM commentary over a diff.
