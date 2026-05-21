@@ -567,7 +567,7 @@ fn neighbors_inner(
                 None => None,
             };
             out.push(NeighborEdge {
-                kind: EdgeKind::from_str(&kind_s).unwrap_or(EdgeKind::References),
+                kind: EdgeKind::from_str(&kind_s).unwrap_or(EdgeKind::Calls),
                 direction: *direction,
                 src: src_rec,
                 dst: dst_rec,

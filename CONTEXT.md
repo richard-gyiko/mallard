@@ -21,7 +21,7 @@ A definition extracted from a source file — function, method, struct, enum, tr
 _Avoid_: definition, declaration, identifier (those are language-level concepts; `Symbol` is mallard's persisted record).
 
 **Edge**:
-A directed relation between symbols. Kinds: `calls`, `imports`, `references`, `contains`, `tests_for`, `tested_by`. `dst` may be unresolved (a name we couldn't bind to a symbol).
+A directed relation between symbols. Kinds: `calls`, `imports`, `contains`, `tests_for`, `tested_by`. `dst` may be unresolved (a name we couldn't bind to a symbol).
 _Avoid_: link, relation, ref.
 
 **Anchor**:

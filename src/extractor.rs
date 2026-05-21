@@ -298,7 +298,14 @@ fn compute_signature(def_node: Node, source: &[u8], kind: SymbolKind) -> String 
 }
 
 fn canonical_params(text: String) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    let trimmed = text.trim();
+    let inner = trimmed
+        .strip_prefix('(')
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(trimmed);
+    let normalized = inner.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalized.trim_end_matches(',').trim();
+    format!("({normalized})")
 }
 
 fn is_method(def_node: Node) -> bool {
