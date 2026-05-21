@@ -6,8 +6,8 @@ use duckdb::{Connection, params};
 use std::str::FromStr;
 
 use crate::core::{
-    Anchor, Edge, FileId, FileRecord, Finding, Metadata, MallardError, ParseError, ParsedFile,
-    Result, Symbol, SymbolKind,
+    Anchor, Edge, EdgeKind, FileId, FileRecord, Finding, Metadata, MallardError, ParseError,
+    ParsedFile, Result, Symbol, SymbolKind,
 };
 use crate::schema::{self, cols, metadata_keys, tables};
 
@@ -221,9 +221,9 @@ impl IndexWriter {
         {
             let mut stmt = self.conn.prepare(
                 "SELECT edge_id, dst_unresolved FROM edges \
-                 WHERE dst_symbol_id IS NULL AND dst_unresolved IS NOT NULL AND kind = 'calls'",
+                 WHERE dst_symbol_id IS NULL AND dst_unresolved IS NOT NULL AND kind = ?",
             )?;
-            let rows = stmt.query_map([], |r| {
+            let rows = stmt.query_map(params![EdgeKind::Calls.as_str()], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
             })?;
             for row in rows {
@@ -233,8 +233,8 @@ impl IndexWriter {
 
         let mut resolutions: Vec<(i64, String)> = Vec::new();
         for (edge_id, name) in &pending {
-            if let Some(sid) = pick_callable(by_qualified.get(name))
-                .or_else(|| pick_callable(by_short.get(name)))
+            if let Some(sid) = pick_callable(by_qualified.get(name).map(Vec::as_slice))
+                .or_else(|| pick_callable(by_short.get(name).map(Vec::as_slice)))
             {
                 resolutions.push((*edge_id, sid));
             }
@@ -278,7 +278,7 @@ impl IndexWriter {
     }
 }
 
-fn pick_callable(candidates: Option<&Vec<(String, SymbolKind)>>) -> Option<String> {
+fn pick_callable(candidates: Option<&[(String, SymbolKind)]>) -> Option<String> {
     let candidates = candidates?;
     let callables: Vec<&String> = candidates
         .iter()
