@@ -79,3 +79,20 @@ pub fn bare_solo_must_not_resolve_to_method() -> u32 {
     // Unresolved (resolver may then mark Inferred or Ambiguous).
     solo()
 }
+
+// Regression for C7: a `const` (or `static`) holding a fn-pointer value
+// is callable via bare-name syntax in real Rust. The candidate kind
+// filter must include Const/Static so the Extracted edge survives.
+const CONST_CALLABLE: fn() -> u32 = bare_caller_of_const_callable_inner;
+
+fn bare_caller_of_const_callable_inner() -> u32 {
+    11
+}
+
+pub fn bare_caller_of_const_callable() -> u32 {
+    // Bare-name call to a Const with a fn() type. The candidate set
+    // contains only one entry (kind=Const). Without the C7 fix this
+    // demoted to Unresolved; with the fix the bare-name branch keeps
+    // Const in its callable set, producing Extracted.
+    CONST_CALLABLE()
+}

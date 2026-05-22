@@ -398,6 +398,32 @@ fn bare_name_call_does_not_resolve_to_method() {
 }
 
 #[test]
+fn bare_call_to_const_fn_pointer_stays_extracted() {
+    // Regression (C7): a `const HANDLER: fn() = ...` is callable via
+    // `HANDLER()`. Previous candidate-kind filter (Function | Macro)
+    // dropped Const, demoting the edge to Unresolved.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let caller = find_symbol(&out, "wrapper.rs", "bare_caller_of_const_callable");
+    let outbound = open_reader(&out)
+        .neighbors(&caller, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+
+    let to_const = outbound
+        .iter()
+        .find(|e| {
+            e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "CONST_CALLABLE")
+                .unwrap_or(false)
+        })
+        .expect("bare CONST_CALLABLE() edge present");
+    assert_eq!(to_const.confidence, EdgeConfidence::Extracted);
+}
+
+#[test]
 fn inherent_plus_trait_impl_same_method_stays_extracted() {
     // Regression (C4): inherent and trait impls of the same `Foo::method`
     // both produce candidates with qualified_name `Foo::method`. Without

@@ -369,20 +369,25 @@ fn is_constructor_call(
     if any_type_def {
         return true;
     }
-    // PascalCase identifiers that aren't a known callable in this file are very
-    // likely scoped variant constructors (e.g. `QueryRequest::LookupSymbol(x)`
-    // captures `LookupSymbol`). Rust functions and methods are snake_case by
-    // convention.
+    // PascalCase identifiers that aren't a known callable in this file are
+    // very likely scoped variant constructors (e.g. `QueryRequest::LookupSymbol(x)`
+    // captures `LookupSymbol`). Rust functions and methods are snake_case;
+    // SCREAMING_SNAKE_CASE consts are uppercase-leading but contain `_`, so
+    // exclude them from the heuristic to keep `CONST_HANDLER()`-style calls.
     let pascal_case = name
         .chars()
         .next()
-        .map(|c| c.is_ascii_uppercase())
-        .unwrap_or(false);
+        .is_some_and(|c| c.is_ascii_uppercase())
+        && !name.contains('_');
     if pascal_case {
         let any_callable = candidates.iter().any(|s| {
             matches!(
                 s.kind,
-                SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
+                SymbolKind::Function
+                    | SymbolKind::Method
+                    | SymbolKind::Macro
+                    | SymbolKind::Const
+                    | SymbolKind::Static
             )
         });
         if !any_callable {
@@ -434,14 +439,28 @@ fn pick_extracted_target<'a>(
         let is_scoped = call_node
             .parent()
             .is_some_and(|p| p.kind() == "scoped_identifier");
+        // Const / Static can hold a fn-pointer value and are callable via
+        // bare or scoped paths — `const HANDLER: fn() = my_handler;
+        // HANDLER()`. Include them so the previously-Extracted edge to
+        // such items survives the kind-filter introduced for C2.
         unique(candidates.iter().copied().filter(|s| {
             if is_scoped {
                 matches!(
                     s.kind,
-                    SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
+                    SymbolKind::Function
+                        | SymbolKind::Method
+                        | SymbolKind::Macro
+                        | SymbolKind::Const
+                        | SymbolKind::Static
                 )
             } else {
-                matches!(s.kind, SymbolKind::Function | SymbolKind::Macro)
+                matches!(
+                    s.kind,
+                    SymbolKind::Function
+                        | SymbolKind::Macro
+                        | SymbolKind::Const
+                        | SymbolKind::Static
+                )
             }
         }))
     }
