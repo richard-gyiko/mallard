@@ -353,6 +353,106 @@ fn method_call_on_self_field_does_not_claim_extracted() {
 }
 
 #[test]
+fn nested_macro_in_allowlisted_body_does_not_emit_phantom_call() {
+    // Regression (C1): `format!(...)` nested inside `assert_eq!(...)` must
+    // not produce a `Calls(format)` edge. The `!` between identifier and
+    // token_tree marks it as a macro invocation, not a function call.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let caller = find_symbol(&out, "wrapper.rs", "tests::nested_macro_must_not_phantom_call");
+    let outbound = open_reader(&out)
+        .neighbors(&caller, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+
+    let bad = outbound.iter().find(|e| {
+        e.dst_unresolved.as_deref() == Some("format")
+            || e.dst.as_ref().map(|d| d.qualified_name == "format").unwrap_or(false)
+    });
+    assert!(bad.is_none(), "nested macro emitted as phantom Calls edge: {bad:?}");
+}
+
+#[test]
+fn macro_body_type_qualified_call_preserves_qualifier() {
+    // Regression (C6): `Builder::make()` inside `assert!(...)` must emit
+    // the qualified name `Builder::make`, not bare `make`. The walker
+    // prepends the prior identifier when it crosses anonymous `::`. The
+    // post-build resolver then matches against `by_qualified` and writes
+    // a resolved Inferred edge to the real `Builder::make` symbol.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let caller = find_symbol(
+        &out,
+        "wrapper.rs",
+        "tests::type_qualified_call_in_macro_keeps_qualifier",
+    );
+    let outbound = open_reader(&out)
+        .neighbors(&caller, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+
+    let resolved = outbound.iter().find(|e| {
+        e.dst
+            .as_ref()
+            .map(|d| d.qualified_name == "Builder::make")
+            .unwrap_or(false)
+    });
+    assert!(
+        resolved.is_some(),
+        "expected resolved Builder::make edge (via by_qualified); got {outbound:?}"
+    );
+}
+
+#[test]
+fn macro_body_method_position_call_is_ambiguous_not_inferred() {
+    // Regression (C3): `o.ping()` inside an `assert!(...)` macro body has
+    // no recoverable receiver type. The parser emits it as Ambiguous so
+    // the resolver does NOT promote it to Inferred against globally-unique
+    // unrelated symbols. UnresolvedCallerHit retains the Ambiguous tier.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let hits = open_reader(&out)
+        .unresolved_callers(&["ping".to_string()], &[EdgeKind::Calls])
+        .unwrap();
+    let assert_hit = hits
+        .iter()
+        .find(|h| h.caller.qualified_name == "tests::ping_via_assert")
+        .expect("ping call from assert! body present");
+    assert_eq!(
+        assert_hit.confidence,
+        EdgeConfidence::Ambiguous,
+        "method-position macro-body call must stay Ambiguous"
+    );
+}
+
+#[test]
+fn macro_body_method_call_is_visible_to_unresolved_callers() {
+    // Regression: tree-sitter parses macro bodies as opaque `token_tree`
+    // nodes. `assert!(o.ping() > 0)` previously hid the `ping` call site —
+    // `unresolved-callers --name ping` returned zero hits. The macro-body
+    // extractor (Gap 3) walks the token_tree and emits each `name(args)`
+    // shape as an Unresolved-trust call reference, which the resolver tiers.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let hits = open_reader(&out)
+        .unresolved_callers(&["ping".to_string()], &[EdgeKind::Calls])
+        .unwrap();
+    let from_assert = hits
+        .iter()
+        .find(|h| h.caller.qualified_name == "tests::ping_via_assert");
+    assert!(
+        from_assert.is_some(),
+        "expected ping call from tests::ping_via_assert (inside assert! body); got {hits:?}"
+    );
+}
+
+#[test]
 fn method_call_on_bare_self_stays_extracted() {
     // Counter-test: bare `self.<method>()` is a same-impl-block call. The
     // intra-file map is the right resolution, confidence Extracted.

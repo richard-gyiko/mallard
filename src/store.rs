@@ -228,9 +228,19 @@ impl IndexWriter {
 
         let mut pending: Vec<(i64, String)> = Vec::new();
         {
+            // Only promote parser-tier `Unresolved` edges. Edges already at
+            // `Ambiguous` were marked so by the parser (e.g. macro-body
+            // method-position calls whose receiver type is unknown — see
+            // `emit_macro_body_call` in extractor.rs) and must not be
+            // re-tiered against the global short-name table; that would
+            // falsely promote them to Inferred against any single
+            // globally-unique unrelated symbol.
             let mut stmt = self.conn.prepare(
                 "SELECT edge_id, dst_unresolved FROM edges \
-                 WHERE dst_symbol_id IS NULL AND dst_unresolved IS NOT NULL AND kind = ?",
+                 WHERE dst_symbol_id IS NULL \
+                   AND dst_unresolved IS NOT NULL \
+                   AND kind = ? \
+                   AND confidence = 'unresolved'",
             )?;
             let rows = stmt.query_map(params![EdgeKind::Calls.as_str()], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
