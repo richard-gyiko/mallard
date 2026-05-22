@@ -313,6 +313,66 @@ fn neighbors_carry_edge_confidence() {
 }
 
 #[test]
+fn method_call_on_self_field_does_not_claim_extracted() {
+    // Regression: `self.<field>.<method>()` previously resolved to a same-impl
+    // method with the same short name and asserted confidence=Extracted (a
+    // self-recursion claim). The fix demotes such calls so the post-build
+    // resolver tiers them as Ambiguous or Inferred.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let outer_ping = find_symbol(&out, "wrapper.rs", "Outer::ping");
+    let outbound = open_reader(&out)
+        .neighbors(&outer_ping, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+
+    // No outbound edge should be Extracted to Outer::ping itself.
+    let bad = outbound.iter().find(|e| {
+        e.confidence == EdgeConfidence::Extracted
+            && e.dst.as_ref().map(|d| d.qualified_name == "Outer::ping").unwrap_or(false)
+    });
+    assert!(bad.is_none(), "self-recursion claim present: {bad:?}");
+
+    // With two `ping` symbols in the file, the resolver marks this Ambiguous.
+    let ping_edge = outbound
+        .iter()
+        .find(|e| {
+            e.dst_unresolved.as_deref() == Some("ping")
+                || e.dst.as_ref().map(|d| d.qualified_name == "Inner::ping").unwrap_or(false)
+        })
+        .expect("ping call edge present");
+    assert!(
+        matches!(
+            ping_edge.confidence,
+            EdgeConfidence::Ambiguous | EdgeConfidence::Inferred
+        ),
+        "expected Ambiguous|Inferred for self.<field>.<method>, got {:?}",
+        ping_edge.confidence,
+    );
+}
+
+#[test]
+fn method_call_on_bare_self_stays_extracted() {
+    // Counter-test: bare `self.<method>()` is a same-impl-block call. The
+    // intra-file map is the right resolution, confidence Extracted.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let echo = find_symbol(&out, "wrapper.rs", "Outer::echo");
+    let outbound = open_reader(&out)
+        .neighbors(&echo, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+
+    let to_outer_ping = outbound
+        .iter()
+        .find(|e| e.dst.as_ref().map(|d| d.qualified_name == "Outer::ping").unwrap_or(false))
+        .expect("echo → Outer::ping edge present");
+    assert_eq!(to_outer_ping.confidence, EdgeConfidence::Extracted);
+}
+
+#[test]
 fn cross_file_resolved_edges_are_inferred() {
     let tmp = TempDir::new().unwrap();
     let out = tmp.path().join("index.duckdb");
