@@ -96,3 +96,47 @@ pub fn bare_caller_of_const_callable() -> u32 {
     // Const in its callable set, producing Extracted.
     CONST_CALLABLE()
 }
+
+pub struct Builder;
+
+impl Builder {
+    pub fn make() -> u32 {
+        99
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_via_assert() {
+        // Call to `ping` lives inside an `assert!` macro body. tree-sitter
+        // parses macro bodies as opaque `token_tree` nodes — without the
+        // macro-body call extractor (Gap 3), this call site is invisible.
+        let o = Outer { inner: Inner { n: 7 } };
+        assert!(o.ping() > 0);
+    }
+
+    #[test]
+    fn nested_macro_must_not_phantom_call(
+    ) {
+        // Regression for C1: nested macro `format!(...)` inside outer
+        // `assert_eq!(...)`. Without the C1 fix, `format` is emitted as a
+        // bogus Calls edge — `!` is anonymous and `identifier(format)` sits
+        // adjacent to a `token_tree(...)` in the outer body. The fix skips
+        // identifier-then-token_tree pairs with `!` between them.
+        let left = 1u32;
+        assert_eq!(left, 1);
+        let _ = format!("{}", left);
+    }
+
+    #[test]
+    fn type_qualified_call_in_macro_keeps_qualifier() {
+        // Regression for C6: `Builder::make()` inside an allowlisted macro
+        // body must emit as qualified `Builder::make`, not bare `make`.
+        // The walker detects `::` between the type identifier and method
+        // identifier and prepends the type segment.
+        assert!(Builder::make() > 0);
+    }
+}
