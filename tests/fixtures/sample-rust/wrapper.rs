@@ -30,3 +30,52 @@ impl Outer {
         self.ping()
     }
 }
+
+// Regression for C4: inherent impl + trait impl share method `Foo::tag`.
+// Both candidates have qualified_name `Outer::tag` (enclosing_impl_type
+// resolves the impl's `type` field for both forms). Without dedupe by
+// qualified_name, matching.len()==2 → Unresolved, regressing Extracted.
+pub trait Tagged {
+    fn tag(&self, suffix: u32) -> u32;
+}
+
+impl Tagged for Outer {
+    fn tag(&self, suffix: u32) -> u32 {
+        100 + suffix
+    }
+}
+
+impl Outer {
+    pub fn tag(&self) -> u32 {
+        42
+    }
+
+    pub fn show_tag(&self) -> u32 {
+        // Bare-self call to `tag`. Two `Outer::tag` symbols exist
+        // (inherent + trait). The dedupe-by-qualified_name fix collapses
+        // them to one Extracted target instead of regressing.
+        self.tag()
+    }
+}
+
+// Regression for C2: a `&self` method whose short name does not exist as
+// a free function in the file must NEVER appear as Extracted from a bare
+// callsite — bare-name calls cannot reach a method without a receiver.
+// Fixture is parsed by tree-sitter only (never compiled); the dangling
+// bare `solo()` is intentional.
+pub struct OnlyMethod;
+
+impl OnlyMethod {
+    pub fn solo(&self) -> u32 {
+        7
+    }
+}
+
+pub fn bare_solo_must_not_resolve_to_method() -> u32 {
+    // `solo` exists only as `OnlyMethod::solo` (Method). Before the fix
+    // the bare-name branch returned that Method candidate, falsely
+    // claiming Extracted with confidence high. After the fix the bare
+    // branch filters Method out of the callable set, leaving the edge
+    // Unresolved (resolver may then mark Inferred or Ambiguous).
+    solo()
+}

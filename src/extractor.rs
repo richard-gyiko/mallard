@@ -403,23 +403,46 @@ fn pick_extracted_target<'a>(
     call_node: Node,
     caller: Option<&Symbol>,
 ) -> Option<&'a Symbol> {
-    // Per `ref_call_match`, a `field_identifier` only reaches here for a
-    // bare-self receiver — restrict to candidates in the caller's impl.
-    // Bare/scoped calls accept any unambiguous callable.
     if call_node.kind() == "field_identifier" {
+        // Bare-self method call (ref_call_match enforces this). Accept a
+        // candidate only if it lives in the caller's impl. Two impls of the
+        // same `Foo::name` (inherent + trait) collide under the impl-type
+        // prefix; dedupe by qualified_name so inherent/trait pairs collapse
+        // to a single target rather than regressing to Unresolved.
         let caller_prefix = caller.and_then(|s| impl_type_prefix(&s.qualified_name))?;
-        unique(
-            candidates
-                .iter()
-                .copied()
-                .filter(|s| impl_type_prefix(&s.qualified_name) == Some(caller_prefix)),
-        )
+        let matching: Vec<&Symbol> = candidates
+            .iter()
+            .copied()
+            .filter(|s| impl_type_prefix(&s.qualified_name) == Some(caller_prefix))
+            .collect();
+        let distinct_qnames = matching
+            .iter()
+            .map(|s| s.qualified_name.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if distinct_qnames == 1 {
+            matching.first().copied()
+        } else {
+            None
+        }
     } else {
+        // Bare-name (`identifier`) vs scoped (`Type::name`) — both leaf
+        // captures are `identifier`-kind; parent distinguishes. A bare-name
+        // call has no receiver and cannot reach a `&self` method; a scoped
+        // call (UFCS / associated function) can. Restrict callable kinds
+        // accordingly to avoid false-Extracted to methods from bare names.
+        let is_scoped = call_node
+            .parent()
+            .is_some_and(|p| p.kind() == "scoped_identifier");
         unique(candidates.iter().copied().filter(|s| {
-            matches!(
-                s.kind,
-                SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
-            )
+            if is_scoped {
+                matches!(
+                    s.kind,
+                    SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
+                )
+            } else {
+                matches!(s.kind, SymbolKind::Function | SymbolKind::Macro)
+            }
         }))
     }
 }

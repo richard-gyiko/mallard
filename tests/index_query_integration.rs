@@ -373,6 +373,57 @@ fn method_call_on_bare_self_stays_extracted() {
 }
 
 #[test]
+fn bare_name_call_does_not_resolve_to_method() {
+    // Regression (C2): a bare-name call cannot reach a `&self` method
+    // without a receiver. `solo` exists only as `OnlyMethod::solo` (Method
+    // kind) in wrapper.rs; the bare `solo()` callsite must not emit an
+    // Extracted edge to that method.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let caller = find_symbol(&out, "wrapper.rs", "bare_solo_must_not_resolve_to_method");
+    let outbound = open_reader(&out)
+        .neighbors(&caller, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+
+    let bad = outbound.iter().find(|e| {
+        e.confidence == EdgeConfidence::Extracted
+            && e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "OnlyMethod::solo")
+                .unwrap_or(false)
+    });
+    assert!(bad.is_none(), "bare-name call falsely Extracted to method: {bad:?}");
+}
+
+#[test]
+fn inherent_plus_trait_impl_same_method_stays_extracted() {
+    // Regression (C4): inherent and trait impls of the same `Foo::method`
+    // both produce candidates with qualified_name `Foo::method`. Without
+    // dedupe by qualified_name in pick_extracted_target, matching.len()==2
+    // demotes the bare-self call to Unresolved.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let show_tag = find_symbol(&out, "wrapper.rs", "Outer::show_tag");
+    let outbound = open_reader(&out)
+        .neighbors(&show_tag, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+
+    let to_tag = outbound
+        .iter()
+        .find(|e| e.dst.as_ref().map(|d| d.qualified_name == "Outer::tag").unwrap_or(false))
+        .expect("show_tag → Outer::tag edge present");
+    assert_eq!(
+        to_tag.confidence,
+        EdgeConfidence::Extracted,
+        "bare self.tag() must collapse inherent+trait `Outer::tag` to one Extracted target"
+    );
+}
+
+#[test]
 fn cross_file_resolved_edges_are_inferred() {
     let tmp = TempDir::new().unwrap();
     let out = tmp.path().join("index.duckdb");
