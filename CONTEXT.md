@@ -41,7 +41,7 @@ The per-file pipeline. Holds a **ParsedSource**, dispatches the language-appropr
 _Avoid_: pipeline, handler, processor (the bare word).
 
 **SymbolExtractor**:
-Per-language adapter. Turns a **ParsedSource** into the `ParsedFile` for that file — **Symbol**s, **Edge**s, parse errors. One impl per supported language (today: `RustExtractor`); **FileProcessor** picks the right one by `ParsedSource::language()`.
+Per-language adapter. Turns a **ParsedSource** into the `ParsedFile` for that file — **Symbol**s, **Edge**s, parse errors. One impl per supported language (today: `RustExtractor`, `PythonExtractor`, `TypeScriptExtractor`); **FileProcessor** picks the right one by `ParsedSource::language()`. Cross-language invariants (constructor filter, qualified-name dedupe, bare-receiver method dispatch, ADR-0010 confidence tiers) live in `extractor_common`; per-language quirks stay in `extractor_<lang>.rs`. See ADR-0012.
 _Avoid_: parser, visitor, extractor (the bare word).
 
 **QueryRequest** / **QueryResult**:
