@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{Result, SymbolId};
+use crate::core::{Result, SymbolId, SymbolKind};
 use crate::query::{Direction, FindingFilter, IndexReader, NeighborEdge, SymbolRecord};
 use crate::EdgeKind;
 
@@ -158,14 +158,26 @@ pub struct ReviewComment {
     pub body: String,
 }
 
+/// Internal-only carrier: review comment plus the metadata needed to
+/// apply post-processing filters (container suppression, diff overlap).
+/// Not serialised — public `ReviewComment` stays stable.
+struct PendingComment {
+    comment: ReviewComment,
+    /// `None` for structural-rule findings (no enclosing symbol tracked).
+    symbol_kind: Option<SymbolKind>,
+    /// Byte span of the enclosing symbol (modified-body family only).
+    /// `None` for structural-rule comments.
+    anchor: Option<(u64, u64)>,
+}
+
 pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
     let base = IndexReader::open(&req.base_db)?;
     let head = IndexReader::open(&req.head_db)?;
-    let mut comments: Vec<ReviewComment> = Vec::new();
     let mut summary = PrReviewSummary::default();
     summary.files_in_scope = req.changed_files.len();
     let empty_hunks: Vec<DiffRange> = Vec::new();
 
+    let mut pending: Vec<PendingComment> = Vec::new();
     for path in &req.changed_files {
         let hunks = req
             .diff_hunks
@@ -173,9 +185,16 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
             .and_then(|h| h.files.get(path))
             .map(Vec::as_slice)
             .unwrap_or(empty_hunks.as_slice());
-        review_file(&base, &head, path, hunks, &mut comments, &mut summary)?;
+        review_file(&base, &head, path, hunks, &mut pending, &mut summary)?;
     }
 
+    // Pattern A — container restate suppression. A comment on a
+    // container kind (class / struct / interface / type alias / module)
+    // is redundant when one of its enclosed leaf symbols also emits in
+    // the same file. Drop the container comment.
+    suppress_container_restate(&mut pending);
+
+    let mut comments: Vec<ReviewComment> = pending.into_iter().map(|p| p.comment).collect();
     let total = comments.len();
     if total > req.max_comments {
         // Drop lowest-tier first: structural-rule > extracted > inferred >
@@ -194,31 +213,111 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
     Ok(PrReviewResult { summary, comments })
 }
 
+/// Pattern A: drop comments on container kinds whose anchor strictly
+/// encloses another comment's anchor in the same file. The leaf comment
+/// is the higher-signal observation; the container's "body length
+/// changed" framing duplicates it.
+fn suppress_container_restate(pending: &mut Vec<PendingComment>) {
+    let mut to_drop: Vec<usize> = Vec::new();
+    for (i, c) in pending.iter().enumerate() {
+        if !is_container_kind(c.symbol_kind) {
+            continue;
+        }
+        let Some((cstart, cend)) = c.anchor else {
+            continue;
+        };
+        let encloses_leaf = pending.iter().enumerate().any(|(j, other)| {
+            if i == j || other.comment.file != c.comment.file {
+                return false;
+            }
+            // Only count NON-container leaves as suppression triggers —
+            // two nested containers shouldn't cancel each other.
+            if is_container_kind(other.symbol_kind) {
+                return false;
+            }
+            let Some((ostart, oend)) = other.anchor else {
+                return false;
+            };
+            ostart > cstart && oend < cend
+        });
+        if encloses_leaf {
+            to_drop.push(i);
+        }
+    }
+    // Drop in reverse so indices stay valid.
+    for &i in to_drop.iter().rev() {
+        pending.remove(i);
+    }
+}
+
+fn is_container_kind(kind: Option<SymbolKind>) -> bool {
+    matches!(
+        kind,
+        Some(
+            SymbolKind::Struct
+                | SymbolKind::Trait
+                | SymbolKind::TypeAlias
+                | SymbolKind::Module
+                | SymbolKind::Enum
+        )
+    )
+}
+
+/// Pattern D: only emit modified-body-logic for callable kinds. Interfaces,
+/// type aliases, consts, statics carry no "body" in the function sense —
+/// their span-delta framing misleads reviewers.
+fn is_callable_kind(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
+    )
+}
+
 fn review_file(
     base: &IndexReader,
     head: &IndexReader,
     path: &str,
     diff_hunks: &[DiffRange],
-    out: &mut Vec<ReviewComment>,
+    out: &mut Vec<PendingComment>,
     summary: &mut PrReviewSummary,
 ) -> Result<()> {
     // Stage 5 — structural-rule findings on the head SHA, scoped to the
     // changed file. Highest-trust tier (deterministic rule match).
+    //
+    // Pattern B (M4 grading fix): when the caller supplied diff hunks,
+    // require the finding's line to overlap a hunk. Without overlap the
+    // rule is firing on pre-existing code untouched by the PR, which
+    // dominated the noise in pilot v4 (e.g. requests #7433 hit 7
+    // pickle.loads sites in tests/ that long predated the PR). If no
+    // diff hunks are supplied, fall back to current behaviour for
+    // backward compatibility.
+    let rule_overlap_required = !diff_hunks.is_empty();
     let findings = head.findings(&FindingFilter {
         path_prefix: Some(path.to_string()),
         ..Default::default()
     })?;
     for f in findings {
-        out.push(ReviewComment {
-            file: f.path.clone(),
-            line: f.start_line,
-            end_line: f.end_line,
-            symbol_qualified_name: None,
-            symbol_id: None,
-            source_kind: "structural-rule".to_string(),
-            confidence_tier: "structural-rule".to_string(),
-            rule_id: Some(f.rule_id),
-            body: f.message,
+        if rule_overlap_required
+            && !diff_hunks
+                .iter()
+                .any(|r| r.overlaps(f.start_line, f.end_line))
+        {
+            continue;
+        }
+        out.push(PendingComment {
+            comment: ReviewComment {
+                file: f.path.clone(),
+                line: f.start_line,
+                end_line: f.end_line,
+                symbol_qualified_name: None,
+                symbol_id: None,
+                source_kind: "structural-rule".to_string(),
+                confidence_tier: "structural-rule".to_string(),
+                rule_id: Some(f.rule_id),
+                body: f.message,
+            },
+            symbol_kind: None,
+            anchor: None,
         });
     }
 
@@ -272,6 +371,8 @@ fn review_file(
             .cloned()
             .collect();
 
+        let anchor = (sym.anchor.start_byte, sym.anchor.end_byte);
+
         if !added_callees.is_empty() || !removed_callees.is_empty() {
             summary.symbols_modified_body += 1;
             let body = render_modified_body_comment(&sym.qualified_name, &added_callees, &removed_callees);
@@ -280,44 +381,57 @@ fn review_file(
             } else {
                 "inferred"
             };
-            out.push(ReviewComment {
-                file: sym.path.clone(),
-                line: sym.anchor.start_line,
-                end_line: sym.anchor.end_line,
-                symbol_qualified_name: Some(sym.qualified_name.clone()),
-                symbol_id: Some(sym.id.0.clone()),
-                source_kind: "modified-body".to_string(),
-                confidence_tier: tier.to_string(),
-                rule_id: None,
-                body,
+            out.push(PendingComment {
+                comment: ReviewComment {
+                    file: sym.path.clone(),
+                    line: sym.anchor.start_line,
+                    end_line: sym.anchor.end_line,
+                    symbol_qualified_name: Some(sym.qualified_name.clone()),
+                    symbol_id: Some(sym.id.0.clone()),
+                    source_kind: "modified-body".to_string(),
+                    confidence_tier: tier.to_string(),
+                    rule_id: None,
+                    body,
+                },
+                symbol_kind: Some(sym.kind),
+                anchor: Some(anchor),
             });
             continue;
         }
 
         // Pure-logic body change: callee set identical but anchor byte
         // span changed → lines added / removed inside the body without
-        // adding new outbound calls. Anchor end_line shifts too, so use
-        // both base + head anchors. The `inferred` tier signals "we know
-        // the body changed; we don't know the semantic impact."
+        // adding new outbound calls. The `inferred` tier signals "we
+        // know the body changed; we don't know the semantic impact."
+        //
+        // Pattern D (M4 grading fix): restrict to callable kinds.
+        // Interfaces, type aliases, consts, statics carry no "body" in
+        // the function sense — emitting on them misleads reviewers
+        // (e.g. axios #10920 flagged `TransitionalOptions` interface
+        // because a field was added).
         let base_sym = base_ids.get(&sym.id.0).expect("stable-id lookup");
         let head_span = sym.anchor.end_byte.saturating_sub(sym.anchor.start_byte);
         let base_span = base_sym.anchor.end_byte.saturating_sub(base_sym.anchor.start_byte);
-        if head_span != base_span {
+        if head_span != base_span && is_callable_kind(sym.kind) {
             summary.symbols_modified_body += 1;
-            out.push(ReviewComment {
-                file: sym.path.clone(),
-                line: sym.anchor.start_line,
-                end_line: sym.anchor.end_line,
-                symbol_qualified_name: Some(sym.qualified_name.clone()),
-                symbol_id: Some(sym.id.0.clone()),
-                source_kind: "modified-body-logic".to_string(),
-                confidence_tier: "inferred".to_string(),
-                rule_id: None,
-                body: format!(
-                    "`{}` body length changed ({} → {} bytes) with the outbound call set intact. \
-                    Pure-logic / control-flow change — manual review recommended.",
-                    sym.qualified_name, base_span, head_span
-                ),
+            out.push(PendingComment {
+                comment: ReviewComment {
+                    file: sym.path.clone(),
+                    line: sym.anchor.start_line,
+                    end_line: sym.anchor.end_line,
+                    symbol_qualified_name: Some(sym.qualified_name.clone()),
+                    symbol_id: Some(sym.id.0.clone()),
+                    source_kind: "modified-body-logic".to_string(),
+                    confidence_tier: "inferred".to_string(),
+                    rule_id: None,
+                    body: format!(
+                        "`{}` body length changed ({} → {} bytes) with the outbound call set intact. \
+                        Pure-logic / control-flow change — manual review recommended.",
+                        sym.qualified_name, base_span, head_span
+                    ),
+                },
+                symbol_kind: Some(sym.kind),
+                anchor: Some(anchor),
             });
             continue;
         }
@@ -329,7 +443,11 @@ fn review_file(
         // GitHub Action computes them via `git diff --unified=0` →
         // `mallard diff-hunks`. Tier `inferred` — we know the lines
         // moved; we don't know the semantic impact.
-        if !diff_hunks.is_empty() {
+        //
+        // Pattern D applies here too — keep the signal scoped to
+        // callable kinds; module-level interfaces / consts already
+        // surface as added/removed elsewhere.
+        if !diff_hunks.is_empty() && is_callable_kind(sym.kind) {
             let overlaps: Vec<DiffRange> = diff_hunks
                 .iter()
                 .copied()
@@ -342,21 +460,25 @@ fn review_file(
                     .map(|r| format!("{}-{}", r.start, r.end))
                     .collect::<Vec<_>>()
                     .join(", ");
-                out.push(ReviewComment {
-                    file: sym.path.clone(),
-                    line: sym.anchor.start_line,
-                    end_line: sym.anchor.end_line,
-                    symbol_qualified_name: Some(sym.qualified_name.clone()),
-                    symbol_id: Some(sym.id.0.clone()),
-                    source_kind: "modified-body-touched".to_string(),
-                    confidence_tier: "inferred".to_string(),
-                    rule_id: None,
-                    body: format!(
-                        "`{}` was touched by the PR diff (lines {}) without changing its \
-                        outbound call set or byte-span. Single-line guard / assertion / \
-                        inline tweak — verify the change reads correctly in context.",
-                        sym.qualified_name, ranges
-                    ),
+                out.push(PendingComment {
+                    comment: ReviewComment {
+                        file: sym.path.clone(),
+                        line: sym.anchor.start_line,
+                        end_line: sym.anchor.end_line,
+                        symbol_qualified_name: Some(sym.qualified_name.clone()),
+                        symbol_id: Some(sym.id.0.clone()),
+                        source_kind: "modified-body-touched".to_string(),
+                        confidence_tier: "inferred".to_string(),
+                        rule_id: None,
+                        body: format!(
+                            "`{}` was touched by the PR diff (lines {}) without changing its \
+                            outbound call set or byte-span. Single-line guard / assertion / \
+                            inline tweak — verify the change reads correctly in context.",
+                            sym.qualified_name, ranges
+                        ),
+                    },
+                    symbol_kind: Some(sym.kind),
+                    anchor: Some(anchor),
                 });
             }
         }
@@ -440,6 +562,96 @@ pub fn render_markdown(result: &PrReviewResult) -> String {
         ));
     }
     buf
+}
+
+#[cfg(test)]
+mod precision_tests {
+    use super::*;
+
+    fn pc(file: &str, span: (u64, u64), kind: Option<SymbolKind>, src_kind: &str) -> PendingComment {
+        PendingComment {
+            comment: ReviewComment {
+                file: file.to_string(),
+                line: 0,
+                end_line: 0,
+                symbol_qualified_name: None,
+                symbol_id: None,
+                source_kind: src_kind.to_string(),
+                confidence_tier: "inferred".to_string(),
+                rule_id: None,
+                body: String::new(),
+            },
+            symbol_kind: kind,
+            anchor: Some(span),
+        }
+    }
+
+    #[test]
+    fn pattern_a_drops_container_when_leaf_present() {
+        // Class anchor 0..1000 with a method anchor 100..500 inside.
+        // The method's comment is the high-signal observation; the
+        // class's "body length changed" restates the diff.
+        let mut p = vec![
+            pc("a.rs", (0, 1000), Some(SymbolKind::Struct), "modified-body-logic"),
+            pc("a.rs", (100, 500), Some(SymbolKind::Method), "modified-body"),
+        ];
+        suppress_container_restate(&mut p);
+        assert_eq!(p.len(), 1, "container dropped; leaf kept");
+        assert_eq!(p[0].symbol_kind, Some(SymbolKind::Method));
+    }
+
+    #[test]
+    fn pattern_a_keeps_container_when_no_leaf_inside() {
+        // Class with span change but no enclosed method emits.
+        let mut p = vec![pc("a.rs", (0, 1000), Some(SymbolKind::Struct), "modified-body-logic")];
+        suppress_container_restate(&mut p);
+        assert_eq!(p.len(), 1, "lone container survives — no leaf to defer to");
+    }
+
+    #[test]
+    fn pattern_a_does_not_drop_across_files() {
+        let mut p = vec![
+            pc("a.rs", (0, 1000), Some(SymbolKind::Struct), "modified-body-logic"),
+            pc("b.rs", (100, 500), Some(SymbolKind::Method), "modified-body"),
+        ];
+        suppress_container_restate(&mut p);
+        assert_eq!(p.len(), 2, "different files — no suppression");
+    }
+
+    #[test]
+    fn pattern_d_callable_predicate() {
+        assert!(is_callable_kind(SymbolKind::Function));
+        assert!(is_callable_kind(SymbolKind::Method));
+        assert!(is_callable_kind(SymbolKind::Macro));
+        assert!(!is_callable_kind(SymbolKind::Struct));
+        assert!(!is_callable_kind(SymbolKind::Trait));
+        assert!(!is_callable_kind(SymbolKind::TypeAlias));
+        assert!(!is_callable_kind(SymbolKind::Const));
+        assert!(!is_callable_kind(SymbolKind::Static));
+        assert!(!is_callable_kind(SymbolKind::Module));
+    }
+
+    #[test]
+    fn pattern_a_container_kinds() {
+        for k in [
+            SymbolKind::Struct,
+            SymbolKind::Trait,
+            SymbolKind::TypeAlias,
+            SymbolKind::Module,
+            SymbolKind::Enum,
+        ] {
+            assert!(is_container_kind(Some(k)), "{:?} should be container", k);
+        }
+        for k in [
+            SymbolKind::Function,
+            SymbolKind::Method,
+            SymbolKind::Macro,
+            SymbolKind::Const,
+            SymbolKind::Static,
+        ] {
+            assert!(!is_container_kind(Some(k)), "{:?} should NOT be container", k);
+        }
+    }
 }
 
 /// Helper for tests / CLI callers that have file paths but no env.
