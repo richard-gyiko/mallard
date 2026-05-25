@@ -160,6 +160,26 @@ fn python_index_records_files_and_dispatches_extractor() {
 }
 
 #[test]
+fn python_index_produces_calls_and_imports() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("python-edges.duckdb");
+    build(python_request(out.clone())).unwrap();
+    let conn = Connection::open(&out).unwrap();
+
+    let calls = count_where(&conn, tables::EDGES, cols::edges::KIND, "calls");
+    assert!(
+        calls >= 2,
+        "expected ≥2 calls (Counter() + double(self.count) + double(c.count) + ping(); intra/cross-file), got {calls}"
+    );
+
+    let imports = count_where(&conn, tables::EDGES, cols::edges::KIND, "imports");
+    assert!(
+        imports >= 1,
+        "expected ≥1 imports edge (app.py imports from lib), got {imports}"
+    );
+}
+
+#[test]
 fn python_extracts_functions_methods_and_classes() {
     let tmp = TempDir::new().unwrap();
     let out = tmp.path().join("python-symbols.duckdb");
