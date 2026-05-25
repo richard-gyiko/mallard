@@ -1,13 +1,20 @@
 # Bundled default rule pack — loaded automatically by `mallard pr-review`
 # and the `mallard-review` GitHub Action when `--rules` / `rules-path`
-# is unset. Curated for high signal-to-noise: each rule must flag a
-# pattern that's almost always worth a reviewer eyeball, not just a
-# style nit.
+# is unset.
 #
-# Per-rule severity (informal): the `python-eval-use` / `js-eval-use`
-# pair are security-critical; the `*-todo` / `*-unimplemented` family
-# flags incomplete code merged to main; `unsafe` / `unwrap` family
-# flags risk that a reviewer probably should ack.
+# Inclusion bar after pilot v2 (Finding 6): only security-critical or
+# correctness-grade rules. Style-only rules (`print()` / `println!()` /
+# `console.log()`) are kept as opt-in via `--rules` so users who want
+# stricter style policing can add them in a project-level rules.yml.
+# Rationale: requests #7433 produced 10 `python-print-call` hits and hit
+# the comment budget on what amounted to test-file diagnostics. Style
+# rules belong in linters, not in the bundled review pack.
+#
+# Severity grades (informal):
+#   - security:   eval / exec / pickle.loads
+#   - correctness: unsafe / todo / unimplemented / panic / non-null
+#                  assertion / as any
+# Both grades earn a reviewer eyeball; style does not.
 
 rules:
   # ============ Rust ============
@@ -31,11 +38,6 @@ rules:
     pattern: "panic!($$$ARGS)"
     message: "panic!() in production code — prefer Result + propagation, or document why panicking is the right call."
 
-  - id: rust-println-macro
-    language: rust
-    pattern: "println!($$$ARGS)"
-    message: "println!() — replace with `tracing` / `log` for non-CLI code."
-
   # ============ Python ============
   - id: python-eval-use
     language: python
@@ -52,11 +54,6 @@ rules:
     pattern: "pickle.loads($$$ARGS)"
     message: "pickle.loads() on untrusted input is an RCE primitive. Use JSON or msgpack instead."
 
-  - id: python-print-call
-    language: python
-    pattern: "print($$$ARGS)"
-    message: "print() call — replace with `logging` for non-CLI code."
-
   # ============ TypeScript / JavaScript ============
   - id: ts-any-cast
     language: typescript
@@ -72,8 +69,3 @@ rules:
     language: typescript
     pattern: "eval($$$ARGS)"
     message: "eval() — high-risk dynamic execution; replace with safer parsing."
-
-  - id: ts-console-log
-    language: typescript
-    pattern: "console.log($$$ARGS)"
-    message: "console.log() — replace with a structured logger for non-debug code."
