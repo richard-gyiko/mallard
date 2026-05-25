@@ -52,6 +52,7 @@ fn pr_review_emits_structural_rule_comments_on_changed_files() {
         head_db,
         changed_files: vec!["main.rs".to_string(), "greet.rs".to_string()],
         max_comments: 20,
+        diff_hunks: None,
     })
     .unwrap();
 
@@ -80,6 +81,7 @@ fn pr_review_respects_max_comments_budget() {
         head_db,
         changed_files: vec!["main.rs".to_string(), "greet.rs".to_string(), "lib.rs".to_string()],
         max_comments: 1,
+        diff_hunks: None,
     })
     .unwrap();
     assert_eq!(result.comments.len(), 1, "budget should cap at 1");
@@ -87,6 +89,88 @@ fn pr_review_respects_max_comments_budget() {
         result.summary.comments_dropped_to_budget >= 1,
         "summary should record dropped count"
     );
+}
+
+#[test]
+fn parse_unified_diff_hunks_extracts_per_file_ranges() {
+    let diff = "\
+diff --git a/src/foo.rs b/src/foo.rs\n\
+--- a/src/foo.rs\n\
++++ b/src/foo.rs\n\
+@@ -10,2 +10,3 @@ fn enclosing()\n\
+-old line a\n\
+-old line b\n\
++new line a\n\
++new line b\n\
++new line c\n\
+@@ -42 +43 @@ fn other()\n\
+-old\n\
++new\n\
+@@ -100,2 +100,0 @@ fn deleted()\n\
+-bye 1\n\
+-bye 2\n\
+diff --git a/src/bar.py b/src/bar.py\n\
+--- a/src/bar.py\n\
++++ b/src/bar.py\n\
+@@ -5,1 +5,1 @@ def thing()\n\
+-x\n\
++y\n\
+";
+    let hunks = mallard::pr_review::parse_unified_diff_hunks(diff);
+    let foo = hunks.files.get("src/foo.rs").expect("src/foo.rs hunks present");
+    assert_eq!(foo.len(), 2, "deletion-only hunk skipped, two head-side hunks remain");
+    assert_eq!(foo[0].start, 10);
+    assert_eq!(foo[0].end, 12);
+    assert_eq!(foo[1].start, 43);
+    assert_eq!(foo[1].end, 43);
+    let bar = hunks.files.get("src/bar.py").expect("src/bar.py hunks present");
+    assert_eq!(bar.len(), 1);
+    assert_eq!(bar[0].start, 5);
+    assert_eq!(bar[0].end, 5);
+}
+
+#[test]
+fn diff_hunks_overlap_emits_modified_body_touched() {
+    use std::collections::HashMap;
+
+    let tmp = TempDir::new().unwrap();
+    let base_db = tmp.path().join("base.duckdb");
+    let head_db = tmp.path().join("head.duckdb");
+    build_at("base-sha", base_db.clone());
+    build_at("head-sha", head_db.clone());
+
+    let bump_line = {
+        let reader = mallard::IndexReader::open(&head_db).unwrap();
+        let syms = reader.symbols_in_file("lib.rs").unwrap();
+        let bump = syms.iter().find(|s| s.qualified_name == "Counter::bump").unwrap();
+        bump.anchor.start_line + 1
+    };
+
+    let mut files = HashMap::new();
+    files.insert(
+        "lib.rs".to_string(),
+        vec![mallard::pr_review::DiffRange {
+            start: bump_line,
+            end: bump_line,
+        }],
+    );
+
+    let result = mallard::pr_review::run(mallard::pr_review::PrReviewRequest {
+        base_db,
+        head_db,
+        changed_files: vec!["lib.rs".to_string()],
+        max_comments: 20,
+        diff_hunks: Some(mallard::pr_review::DiffHunks { files }),
+    })
+    .unwrap();
+
+    let touched = result
+        .comments
+        .iter()
+        .find(|c| c.source_kind == "modified-body-touched")
+        .expect("Finding-7 `modified-body-touched` comment present");
+    assert_eq!(touched.confidence_tier, "inferred");
+    assert!(touched.body.contains("Counter::bump"));
 }
 
 #[test]
@@ -102,6 +186,7 @@ fn pr_review_markdown_render_includes_badge() {
         head_db,
         changed_files: vec!["greet.rs".to_string()],
         max_comments: 5,
+        diff_hunks: None,
     })
     .unwrap();
     let md = pr_review::render_markdown(&result);

@@ -31,6 +31,101 @@ pub struct PrReviewRequest {
     pub head_db: PathBuf,
     pub changed_files: Vec<String>,
     pub max_comments: usize,
+    /// Optional per-file diff hunks (1-based line ranges in the head
+    /// SHA's file content). When provided, enables Finding-7 detection:
+    /// stable-ID symbols whose anchor overlaps a diff hunk get a
+    /// `modified-body-touched` comment even when callees + byte-span
+    /// don't change. Source: `git diff --unified=0` post-processed by
+    /// the caller into JSON. See `docs/research/finding-7-...md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_hunks: Option<DiffHunks>,
+}
+
+/// Per-file diff hunks consumed by the review pipeline.
+///
+/// JSON shape:
+/// ```json
+/// { "files": { "lib/foo.rs": [{"start": 42, "end": 58}, ...] } }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiffHunks {
+    pub files: HashMap<String, Vec<DiffRange>>,
+}
+
+/// 1-based inclusive line range identifying a changed region.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct DiffRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl DiffRange {
+    fn overlaps(&self, anchor_start: u32, anchor_end: u32) -> bool {
+        self.start <= anchor_end && self.end >= anchor_start
+    }
+}
+
+/// Parse the output of `git diff --unified=0 <base> <head>` into per-file
+/// diff hunks. Each `@@ -A,B +C,D @@` header contributes one DiffRange
+/// keyed by the b-side file name (the head-SHA path).
+///
+/// Robust to:
+/// - Single-line hunks (`+C` with no count → count = 1)
+/// - Deletion-only hunks (`+C,0` → skipped; no head-side lines)
+/// - Rename headers (`diff --git a/old b/new` → key = `new`)
+pub fn parse_unified_diff_hunks(diff_text: &str) -> DiffHunks {
+    let mut files: HashMap<String, Vec<DiffRange>> = HashMap::new();
+    let mut current_file: Option<String> = None;
+    for line in diff_text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            // `a/path b/path` — take the b-side as the head-SHA path.
+            if let Some(b_idx) = rest.find(" b/") {
+                current_file = Some(rest[b_idx + 3..].to_string());
+            } else {
+                current_file = None;
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            // `+++ b/<path>` — preferred source for the file name when
+            // present; overrides the `diff --git` guess for cases where
+            // the path contains spaces.
+            current_file = Some(rest.to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            // `@@ -A,B +C,D @@ context...`
+            let plus_idx = match rest.find('+') {
+                Some(i) => i,
+                None => continue,
+            };
+            let after_plus = &rest[plus_idx + 1..];
+            let end = after_plus
+                .find(|c: char| c == ' ' || c == '@')
+                .unwrap_or(after_plus.len());
+            let plus_part = &after_plus[..end];
+            let (start_str, count_str) = match plus_part.split_once(',') {
+                Some((s, c)) => (s, c),
+                None => (plus_part, "1"),
+            };
+            let start: u32 = match start_str.parse() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let count: u32 = count_str.parse().unwrap_or(1);
+            if count == 0 {
+                continue;
+            }
+            let end_line = start + count - 1;
+            if let Some(file) = current_file.as_ref() {
+                files.entry(file.clone()).or_default().push(DiffRange {
+                    start,
+                    end: end_line,
+                });
+            }
+        }
+    }
+    DiffHunks { files }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,9 +164,16 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
     let mut comments: Vec<ReviewComment> = Vec::new();
     let mut summary = PrReviewSummary::default();
     summary.files_in_scope = req.changed_files.len();
+    let empty_hunks: Vec<DiffRange> = Vec::new();
 
     for path in &req.changed_files {
-        review_file(&base, &head, path, &mut comments, &mut summary)?;
+        let hunks = req
+            .diff_hunks
+            .as_ref()
+            .and_then(|h| h.files.get(path))
+            .map(Vec::as_slice)
+            .unwrap_or(empty_hunks.as_slice());
+        review_file(&base, &head, path, hunks, &mut comments, &mut summary)?;
     }
 
     let total = comments.len();
@@ -96,6 +198,7 @@ fn review_file(
     base: &IndexReader,
     head: &IndexReader,
     path: &str,
+    diff_hunks: &[DiffRange],
     out: &mut Vec<ReviewComment>,
     summary: &mut PrReviewSummary,
 ) -> Result<()> {
@@ -216,6 +319,46 @@ fn review_file(
                     sym.qualified_name, base_span, head_span
                 ),
             });
+            continue;
+        }
+
+        // Finding-7 signal — `modified-body-touched`. Callees + byte-span
+        // both unchanged, but the PR diff hunks landed lines inside the
+        // symbol's anchor range. Caller must supply diff hunks for this
+        // branch to fire (no overlap when `diff_hunks` is empty); the
+        // GitHub Action computes them via `git diff --unified=0` →
+        // `mallard diff-hunks`. Tier `inferred` — we know the lines
+        // moved; we don't know the semantic impact.
+        if !diff_hunks.is_empty() {
+            let overlaps: Vec<DiffRange> = diff_hunks
+                .iter()
+                .copied()
+                .filter(|r| r.overlaps(sym.anchor.start_line + 1, sym.anchor.end_line + 1))
+                .collect();
+            if !overlaps.is_empty() {
+                summary.symbols_modified_body += 1;
+                let ranges = overlaps
+                    .iter()
+                    .map(|r| format!("{}-{}", r.start, r.end))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push(ReviewComment {
+                    file: sym.path.clone(),
+                    line: sym.anchor.start_line,
+                    end_line: sym.anchor.end_line,
+                    symbol_qualified_name: Some(sym.qualified_name.clone()),
+                    symbol_id: Some(sym.id.0.clone()),
+                    source_kind: "modified-body-touched".to_string(),
+                    confidence_tier: "inferred".to_string(),
+                    rule_id: None,
+                    body: format!(
+                        "`{}` was touched by the PR diff (lines {}) without changing its \
+                        outbound call set or byte-span. Single-line guard / assertion / \
+                        inline tweak — verify the change reads correctly in context.",
+                        sym.qualified_name, ranges
+                    ),
+                });
+            }
         }
     }
     Ok(())
@@ -311,5 +454,6 @@ pub fn from_paths(
         head_db: head_db.to_path_buf(),
         changed_files,
         max_comments,
+        diff_hunks: None,
     })
 }
