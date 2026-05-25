@@ -8,7 +8,7 @@ Core thesis: LLMs are strong enough; the bottleneck is repository context retrie
 
 ## Modules
 
-- **Parser / SymbolExtractor** — Per-language adapter behind `SymbolExtractor` trait. Rust today; tree-sitter front-end, extracts symbols, edges, parse errors. See [decisions/0003-tree-sitter-and-ast-grep-parsing.md](decisions/0003-tree-sitter-and-ast-grep-parsing.md).
+- **Parser / SymbolExtractor** — Per-language adapter behind `SymbolExtractor` trait. **Rust, Python, TypeScript / TSX** today; tree-sitter front-end, extracts symbols, edges, parse errors. Per-language quirks isolated in `src/extractor_<lang>.rs`; cross-language invariants live in `src/extractor_common.rs`. See [decisions/0003-tree-sitter-and-ast-grep-parsing.md](decisions/0003-tree-sitter-and-ast-grep-parsing.md) and [decisions/0012-multi-language-extractor-architecture.md](decisions/0012-multi-language-extractor-architecture.md).
 - **Parsed source** — One tree-sitter parse per file, shared between symbol extraction and rule matching.
 - **File processor** — Per-file pipeline. Holds the `ParsedSource`, dispatches the language-appropriate `SymbolExtractor` and rule matcher, records timing.
 - **Index build** — Walks repo, drives the file processor, computes stable symbol IDs, writes graph to store, runs post-build name resolution. See [specs/indexing/index-build.md](specs/indexing/index-build.md) and [decisions/0008-heuristic-name-resolution.md](decisions/0008-heuristic-name-resolution.md).
@@ -16,7 +16,9 @@ Core thesis: LLMs are strong enough; the bottleneck is repository context retrie
 - **Store** — DuckDB-backed graph and symbol tables. Ordered edge tables, recursive CTEs. See [decisions/0002-duckdb-as-graph-and-index-store.md](decisions/0002-duckdb-as-graph-and-index-store.md).
 - **Structural rules engine** — ast-grep rule runner for deterministic findings (anti-patterns, framework rules, lint-like signals).
 - **Retrieval** — Agent-composed via the CLI primitives + Agent Skill in v0; no dedicated built module yet. Symbolic-first stays the policy ([decisions/0004-symbolic-graph-retrieval-over-embeddings-first.md](decisions/0004-symbolic-graph-retrieval-over-embeddings-first.md)); delivery shape per [decisions/0007-defer-retrieval-module-agents-compose-primitives.md](decisions/0007-defer-retrieval-module-agents-compose-primitives.md). Eventual built-module shape sketched in [specs/retrieval/symbolic-graph-retrieval.md](specs/retrieval/symbolic-graph-retrieval.md).
-- **PR reviewer** — Wedge product. Built as an agent flow that calls `mallard query` primitives, not as a Rust consumer of a built retrieval module. See [specs/pr-review/pull-request-review.md](specs/pr-review/pull-request-review.md).
+- **PR reviewer** — Wedge product. Two delivery shapes:
+  - **`mallard pr-review` subcommand** (v1, shipped) — deterministic-only stages 3–5; no LLM call. Consumed by the `mallard-review` composite GitHub Action under `.github/actions/review/`. See [decisions/0011-deterministic-only-pr-review-v1.md](decisions/0011-deterministic-only-pr-review-v1.md).
+  - **Agent skill** — Built as a Claude Code skill that calls `mallard query` primitives + the LLM. Used for richer synthesis when human reviewers want it. See [specs/pr-review/pull-request-review.md](specs/pr-review/pull-request-review.md).
 
 ## Data flows
 
@@ -26,8 +28,8 @@ Core thesis: LLMs are strong enough; the bottleneck is repository context retrie
 ## Integrations
 
 - **Git** — read-only repository access; commit SHA is the indexing unit.
-- **GitHub / PR providers** — diff input + review output (target surface; not committed yet).
-- **LLM provider** — review synthesis. Provider-agnostic at the boundary.
+- **GitHub PR provider** — diff input via `git diff --name-only`; review output via `gh pr comment`. Composite Action at `.github/actions/review/action.yml`.
+- **LLM provider** — review synthesis (optional, Phase D). Provider-agnostic at the boundary. v1 ships deterministic-only — zero LLM calls per [decisions/0011-deterministic-only-pr-review-v1.md](decisions/0011-deterministic-only-pr-review-v1.md).
 
 ## Deployment
 
@@ -52,3 +54,9 @@ Rust. Justified by Tree-sitter / ast-grep / DuckDB ecosystem fit and the local-f
 - [decisions/0004-symbolic-graph-retrieval-over-embeddings-first.md](decisions/0004-symbolic-graph-retrieval-over-embeddings-first.md)
 - [decisions/0005-ephemeral-indexing-defer-incremental.md](decisions/0005-ephemeral-indexing-defer-incremental.md)
 - [decisions/0006-pr-review-as-initial-wedge.md](decisions/0006-pr-review-as-initial-wedge.md)
+- [decisions/0007-defer-retrieval-module-agents-compose-primitives.md](decisions/0007-defer-retrieval-module-agents-compose-primitives.md)
+- [decisions/0008-heuristic-name-resolution.md](decisions/0008-heuristic-name-resolution.md)
+- [decisions/0009-pr-review-architecture-pattern.md](decisions/0009-pr-review-architecture-pattern.md)
+- [decisions/0010-edge-confidence-tier.md](decisions/0010-edge-confidence-tier.md)
+- [decisions/0011-deterministic-only-pr-review-v1.md](decisions/0011-deterministic-only-pr-review-v1.md)
+- [decisions/0012-multi-language-extractor-architecture.md](decisions/0012-multi-language-extractor-architecture.md)
