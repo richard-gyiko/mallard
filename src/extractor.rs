@@ -64,7 +64,7 @@ impl RustExtractor {
         relative_path: &str,
     ) -> (Vec<Symbol>, Vec<Edge>) {
         let mut symbols: Vec<Symbol> = Vec::new();
-        let mut references: Vec<(Node, String, EdgeKind)> = Vec::new();
+        let mut references: Vec<(Node, String, EdgeKind, bool)> = Vec::new();
         let mut imports: Vec<(Node, String)> = Vec::new();
 
         let mut matches = self.cursor.matches(&self.query, root, source);
@@ -76,9 +76,9 @@ impl RustExtractor {
                         symbols.push(sym);
                     }
                 }
-                9 | 10 | 11 => {
-                    if let Some((node, name)) = ref_call_match(m, source) {
-                        references.push((node, name, EdgeKind::Calls));
+                9..=11 => {
+                    if let Some((node, name, trust_intra_file)) = ref_call_match(m, source) {
+                        references.push((node, name, EdgeKind::Calls, trust_intra_file));
                     }
                 }
                 12 => {
@@ -93,13 +93,11 @@ impl RustExtractor {
 
         let mut edges: Vec<Edge> = Vec::new();
 
-        let mut symbols_by_name: std::collections::HashMap<&str, &Symbol> =
-            std::collections::HashMap::with_capacity(symbols.len() * 2);
+        let mut symbols_by_short: std::collections::HashMap<&str, Vec<&Symbol>> =
+            std::collections::HashMap::with_capacity(symbols.len());
         for s in &symbols {
-            symbols_by_name.insert(s.qualified_name.as_str(), s);
-            if let Some(short) = short_name(&s.qualified_name) {
-                symbols_by_name.entry(short).or_insert(s);
-            }
+            let key = short_name(&s.qualified_name).unwrap_or(s.qualified_name.as_str());
+            symbols_by_short.entry(key).or_default().push(s);
         }
 
         let file_pseudo_src = SymbolId(format!("file:{}", relative_path));
@@ -121,14 +119,27 @@ impl RustExtractor {
         // call name is a stdlib variant constructor, matches a same-file
         // type definition, or is PascalCase with no same-file function /
         // method / macro of the same name.
-        for (node, name, kind) in references {
-            if kind == EdgeKind::Calls && is_constructor_call(&name, &symbols_by_name) {
+        for (node, name, kind, trust_intra_file) in references {
+            if kind == EdgeKind::Calls && is_constructor_call(&name, &symbols_by_short) {
                 continue;
             }
-            let enclosing = find_enclosing_definition(node, &symbols)
+            let enclosing_sym = find_enclosing_definition(node, &symbols);
+            let enclosing = enclosing_sym
                 .map(|s| s.id.clone())
                 .unwrap_or_else(|| file_pseudo_src.clone());
-            let dst = symbols_by_name.get(name.as_str()).map(|s| s.id.clone());
+            // Only claim Extracted when the call's receiver semantics let us
+            // trust the intra-file short-name map; otherwise emit Unresolved
+            // and let the post-build resolver tier (Inferred / Ambiguous /
+            // Unresolved). See ADR-0010 and `ref_call_match`.
+            let dst = if trust_intra_file {
+                let candidates = symbols_by_short
+                    .get(name.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                pick_extracted_target(candidates, node, enclosing_sym).map(|s| s.id.clone())
+            } else {
+                None
+            };
             let (dst_unresolved, confidence) = if dst.is_some() {
                 (None, EdgeConfidence::Extracted)
             } else {
@@ -264,12 +275,36 @@ fn pick_name_and_def<'tree>(
 fn ref_call_match<'tree>(
     m: &tree_sitter::QueryMatch<'_, 'tree>,
     source: &[u8],
-) -> Option<(Node<'tree>, String)> {
+) -> Option<(Node<'tree>, String, bool)> {
     let name_capture = m.captures.iter().rev().find(|c| {
         let kind = c.node.kind();
         kind == "identifier" || kind == "field_identifier"
     })?;
-    Some((name_capture.node, node_text(name_capture.node, source)))
+    let node = name_capture.node;
+    let name = node_text(node, source);
+    // Trust the per-file short-name map only when the receiver type matches
+    // the enclosing impl block. For method calls (`field_identifier`), that's
+    // true iff the receiver is bare `self` — `self.foo()` resolves within the
+    // same impl, `self.field.foo()` does not. Bare-name (`identifier`) and
+    // scoped (`Type::name`) calls have no receiver, so the intra-file map is
+    // the right place to look.
+    let trust_intra_file = if node.kind() == "field_identifier" {
+        method_call_receiver_is_bare_self(node)
+    } else {
+        true
+    };
+    Some((node, name, trust_intra_file))
+}
+
+/// True when a `field_identifier` capture corresponds to a method call whose
+/// receiver is bare `self`. Walks up to the enclosing `field_expression` and
+/// inspects its `value` field.
+fn method_call_receiver_is_bare_self(field_identifier: Node) -> bool {
+    field_identifier
+        .parent()
+        .filter(|p| p.kind() == "field_expression")
+        .and_then(|p| p.child_by_field_name("value"))
+        .is_some_and(|recv| recv.kind() == "self")
 }
 
 fn compute_qualified_name(def_node: Node, name: &str, kind: SymbolKind, source: &[u8]) -> String {
@@ -319,41 +354,128 @@ const STDLIB_VARIANT_CONSTRUCTORS: &[&str] = &["Ok", "Err", "Some", "None"];
 
 fn is_constructor_call(
     name: &str,
-    symbols_by_name: &std::collections::HashMap<&str, &Symbol>,
+    symbols_by_short: &std::collections::HashMap<&str, Vec<&Symbol>>,
 ) -> bool {
     if STDLIB_VARIANT_CONSTRUCTORS.contains(&name) {
         return true;
     }
-    let sym = symbols_by_name.get(name).copied();
-    if let Some(s) = sym {
-        if matches!(
+    let candidates = symbols_by_short.get(name).map(Vec::as_slice).unwrap_or(&[]);
+    let any_type_def = candidates.iter().any(|s| {
+        matches!(
             s.kind,
             SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::TypeAlias
-        ) {
-            return true;
-        }
+        )
+    });
+    if any_type_def {
+        return true;
     }
-    // PascalCase identifiers that aren't a known callable in this file are very
-    // likely scoped variant constructors (e.g. `QueryRequest::LookupSymbol(x)`
-    // captures `LookupSymbol`). Rust functions and methods are snake_case by
-    // convention.
+    // PascalCase identifiers that aren't a known callable in this file are
+    // very likely scoped variant constructors (e.g. `QueryRequest::LookupSymbol(x)`
+    // captures `LookupSymbol`). Rust functions and methods are snake_case;
+    // SCREAMING_SNAKE_CASE consts are uppercase-leading but contain `_`, so
+    // exclude them from the heuristic to keep `CONST_HANDLER()`-style calls.
     let pascal_case = name
         .chars()
         .next()
-        .map(|c| c.is_ascii_uppercase())
-        .unwrap_or(false);
+        .is_some_and(|c| c.is_ascii_uppercase())
+        && !name.contains('_');
     if pascal_case {
-        let is_known_callable = sym.is_some_and(|s| {
+        let any_callable = candidates.iter().any(|s| {
             matches!(
                 s.kind,
-                SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
+                SymbolKind::Function
+                    | SymbolKind::Method
+                    | SymbolKind::Macro
+                    | SymbolKind::Const
+                    | SymbolKind::Static
             )
         });
-        if !is_known_callable {
+        if !any_callable {
             return true;
         }
     }
     false
+}
+
+/// Disambiguate intra-file short-name candidates for an Extracted match.
+///
+/// For a method call (`field_identifier` capture) we require the candidate to
+/// share the caller's impl-type prefix — i.e. live in the same `impl` block.
+/// For a bare-name function call (`identifier`) we accept only a unique
+/// callable candidate; multiple shorts are ambiguous → let the resolver tier.
+fn pick_extracted_target<'a>(
+    candidates: &[&'a Symbol],
+    call_node: Node,
+    caller: Option<&Symbol>,
+) -> Option<&'a Symbol> {
+    if call_node.kind() == "field_identifier" {
+        // Bare-self method call (ref_call_match enforces this). Accept a
+        // candidate only if it lives in the caller's impl. Two impls of the
+        // same `Foo::name` (inherent + trait) collide under the impl-type
+        // prefix; dedupe by qualified_name so inherent/trait pairs collapse
+        // to a single target rather than regressing to Unresolved.
+        let caller_prefix = caller.and_then(|s| impl_type_prefix(&s.qualified_name))?;
+        let matching: Vec<&Symbol> = candidates
+            .iter()
+            .copied()
+            .filter(|s| impl_type_prefix(&s.qualified_name) == Some(caller_prefix))
+            .collect();
+        let distinct_qnames = matching
+            .iter()
+            .map(|s| s.qualified_name.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if distinct_qnames == 1 {
+            matching.first().copied()
+        } else {
+            None
+        }
+    } else {
+        // Bare-name (`identifier`) vs scoped (`Type::name`) — both leaf
+        // captures are `identifier`-kind; parent distinguishes. A bare-name
+        // call has no receiver and cannot reach a `&self` method; a scoped
+        // call (UFCS / associated function) can. Restrict callable kinds
+        // accordingly to avoid false-Extracted to methods from bare names.
+        let is_scoped = call_node
+            .parent()
+            .is_some_and(|p| p.kind() == "scoped_identifier");
+        // Const / Static can hold a fn-pointer value and are callable via
+        // bare or scoped paths — `const HANDLER: fn() = my_handler;
+        // HANDLER()`. Include them so the previously-Extracted edge to
+        // such items survives the kind-filter introduced for C2.
+        unique(candidates.iter().copied().filter(|s| {
+            if is_scoped {
+                matches!(
+                    s.kind,
+                    SymbolKind::Function
+                        | SymbolKind::Method
+                        | SymbolKind::Macro
+                        | SymbolKind::Const
+                        | SymbolKind::Static
+                )
+            } else {
+                matches!(
+                    s.kind,
+                    SymbolKind::Function
+                        | SymbolKind::Macro
+                        | SymbolKind::Const
+                        | SymbolKind::Static
+                )
+            }
+        }))
+    }
+}
+
+/// Return the sole item from `it` if it yields exactly one, else None.
+fn unique<T, I: Iterator<Item = T>>(mut it: I) -> Option<T> {
+    let first = it.next()?;
+    if it.next().is_some() { None } else { Some(first) }
+}
+
+/// The `Type` portion of a `Type::method` qualified name. None for bare
+/// (module-level) symbols.
+fn impl_type_prefix(qualified: &str) -> Option<&str> {
+    qualified.rsplit_once("::").map(|(prefix, _)| prefix)
 }
 
 fn canonical_params(text: String) -> String {
