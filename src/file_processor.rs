@@ -6,12 +6,14 @@ use crate::core::{
     FileId, FileRecord, FileStatus, FileTiming, ParsedFile, ProcessOutcome, Result,
 };
 use crate::extractor::{RustExtractor, SymbolExtractor};
+use crate::extractor_python::PythonExtractor;
 use crate::parsed_source::ParsedSource;
 use crate::rules::RuleSet;
 use crate::walk::WalkEntry;
 
 pub struct FileProcessor {
     rust: RustExtractor,
+    python: PythonExtractor,
     rules: RuleSet,
 }
 
@@ -19,6 +21,7 @@ impl FileProcessor {
     pub fn new(rules: RuleSet) -> Result<Self> {
         Ok(FileProcessor {
             rust: RustExtractor::new()?,
+            python: PythonExtractor::new()?,
             rules,
         })
     }
@@ -57,10 +60,12 @@ impl FileProcessor {
         let Some(lang) = lang else {
             return Ok(skipped(file_record, FileStatus::SkippedExtension));
         };
-        // Today only Rust has a SymbolExtractor; second-language support lands here as
-        // an additional arm + an additional field on FileProcessor.
+        // Per-language `SymbolExtractor` dispatch. Add new languages here as
+        // additional arms + new fields on `FileProcessor`. See ADR-0012 for
+        // the multi-language extractor architecture.
         let extractor: &mut dyn SymbolExtractor = match lang {
             SupportLang::Rust => &mut self.rust,
+            SupportLang::Python => &mut self.python,
             _ => return Ok(skipped(file_record, FileStatus::SkippedExtension)),
         };
 

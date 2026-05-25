@@ -125,6 +125,7 @@ fn detect_language(path: &Path, allow_list: &[String]) -> Option<String> {
     let ext = path.extension()?.to_str()?.to_lowercase();
     let language = match ext.as_str() {
         "rs" => "rust",
+        "py" => "python",
         _ => return None,
     };
     if allow_list.is_empty() || allow_list.iter().any(|l| l == language) {
