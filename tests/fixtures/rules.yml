@@ -7,3 +7,15 @@ rules:
     language: rust
     pattern: "println!($$$ARGS)"
     message: "println! call — replace with logging for non-CLI code."
+  - id: python-eval-use
+    language: python
+    pattern: "eval($$$ARGS)"
+    message: "eval() — high-risk dynamic execution; replace with explicit parsing."
+  - id: python-exec-use
+    language: python
+    pattern: "exec($$$ARGS)"
+    message: "exec() — high-risk dynamic execution; avoid in production code."
+  - id: python-print-call
+    language: python
+    pattern: "print($$$ARGS)"
+    message: "print() call — replace with logging for non-CLI code."
