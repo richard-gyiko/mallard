@@ -218,10 +218,7 @@ impl IndexWriter {
                     .entry(qname.clone())
                     .or_default()
                     .push((sid.clone(), kind));
-                let short = qname
-                    .rsplit_once("::")
-                    .map(|(_, s)| s.to_string())
-                    .unwrap_or(qname);
+                let short = short_name_for_resolver(&qname);
                 by_short.entry(short).or_default().push((sid, kind));
             }
         }
@@ -319,6 +316,24 @@ impl IndexWriter {
         std::fs::rename(&self.tmp_path, &self.final_path)?;
         Ok(())
     }
+}
+
+/// Short-name extraction for the resolver's global `by_short` table.
+/// Handles both Rust's `Foo::bar` and Python's `Foo.bar` qualified names
+/// — picks the rightmost segment after either separator. Used as the
+/// resolver's bridge across language conventions; per-language symbol IDs
+/// stay distinct because `qualified_name` keeps the original separator.
+fn short_name_for_resolver(qname: &str) -> String {
+    // Pick whichever separator ends latest in the string and slice past it.
+    [
+        qname.rfind("::").map(|i| i + 2),
+        qname.rfind('.').map(|i| i + 1),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .map(|i| qname[i..].to_string())
+    .unwrap_or_else(|| qname.to_string())
 }
 
 fn classify_match(

@@ -12,7 +12,21 @@ const PYTHON_QUERY: &str = r#"
 (function_definition name: (identifier) @def.function.name) @def.function
 
 (class_definition name: (identifier) @def.class.name) @def.class
+
+(call function: (identifier) @ref.call.simple) @ref.call
+
+(call function: (attribute attribute: (identifier) @ref.call.method)) @ref.call
+
+(import_statement) @import.decl
+
+(import_from_statement) @import.decl
 "#;
+
+/// Python identifiers commonly used as the implicit receiver for instance
+/// (`self`) or class (`cls`) methods. Bare-receiver method calls trust the
+/// intra-file map; anything else (`self.<field>.method()`, `obj.method()`)
+/// emits Unresolved so the post-build resolver can tier.
+const PYTHON_BARE_RECEIVERS: &[&str] = &["self", "cls"];
 
 /// Python `SymbolExtractor`. A2 ships definitions (functions, methods,
 /// classes); call extraction + Gap-2/3 ports land in A3. Mirrors the Rust
@@ -40,17 +54,35 @@ impl PythonExtractor {
         relative_path: &str,
     ) -> (Vec<Symbol>, Vec<Edge>) {
         let mut symbols: Vec<Symbol> = Vec::new();
+        let mut references: Vec<CallRef> = Vec::new();
+        let mut imports: Vec<(Node, String)> = Vec::new();
 
         let mut matches = self.cursor.matches(&self.query, root, source);
         while let Some(m) = matches.next() {
-            let pattern = m.pattern_index;
-            if let Some(sym) = build_symbol_match(m, pattern, source, file_id, relative_path) {
-                symbols.push(sym);
+            match m.pattern_index {
+                0 | 1 => {
+                    if let Some(sym) =
+                        build_symbol_match(m, m.pattern_index, source, file_id, relative_path)
+                    {
+                        symbols.push(sym);
+                    }
+                }
+                2 | 3 => {
+                    if let Some(r) = ref_call_match(m, source) {
+                        references.push(r);
+                    }
+                }
+                4 | 5 => {
+                    if let Some(node) = m.captures.first().map(|c| c.node) {
+                        imports.push((node, node_text(node, source)));
+                    }
+                }
+                _ => {}
             }
         }
 
         let file_pseudo_src = SymbolId(format!("file:{}", relative_path));
-        let mut edges: Vec<Edge> = Vec::with_capacity(symbols.len());
+        let mut edges: Vec<Edge> = Vec::with_capacity(symbols.len() + references.len());
         for sym in &symbols {
             edges.push(Edge {
                 src: file_pseudo_src.clone(),
@@ -60,6 +92,61 @@ impl PythonExtractor {
                 confidence: EdgeConfidence::Extracted,
                 file_id,
                 order_key: sym.anchor.start_byte,
+            });
+        }
+
+        let mut symbols_by_short: std::collections::HashMap<&str, Vec<&Symbol>> =
+            std::collections::HashMap::with_capacity(symbols.len());
+        for s in &symbols {
+            let key = short_name(&s.qualified_name).unwrap_or(s.qualified_name.as_str());
+            symbols_by_short.entry(key).or_default().push(s);
+        }
+
+        // Mirrors `RustExtractor` post wedge-dogfood-1 + C2/C4/C7 fixes:
+        // tuple-struct / class-constructor filter, per-call confidence
+        // tiering, and impl-prefix scoping for bare-self method calls.
+        for r in references {
+            if is_class_constructor_call(&r.name, &symbols_by_short) {
+                continue;
+            }
+            let enclosing_sym = find_enclosing_definition(r.node, &symbols);
+            let enclosing = enclosing_sym
+                .map(|s| s.id.clone())
+                .unwrap_or_else(|| file_pseudo_src.clone());
+            let dst = if r.trust_intra_file {
+                let candidates = symbols_by_short
+                    .get(r.name.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                pick_extracted_target(candidates, r.node, enclosing_sym).map(|s| s.id.clone())
+            } else {
+                None
+            };
+            let (dst_unresolved, confidence) = if dst.is_some() {
+                (None, EdgeConfidence::Extracted)
+            } else {
+                (Some(r.name.clone()), EdgeConfidence::Unresolved)
+            };
+            edges.push(Edge {
+                src: enclosing,
+                dst,
+                dst_unresolved,
+                kind: EdgeKind::Calls,
+                confidence,
+                file_id,
+                order_key: r.node.start_byte() as u64,
+            });
+        }
+
+        for (node, text) in imports {
+            edges.push(Edge {
+                src: file_pseudo_src.clone(),
+                dst: None,
+                dst_unresolved: Some(text),
+                kind: EdgeKind::Imports,
+                confidence: EdgeConfidence::Unresolved,
+                file_id,
+                order_key: node.start_byte() as u64,
             });
         }
 
@@ -211,6 +298,146 @@ fn canonical_params(text: String) -> String {
     let normalized = inner.split_whitespace().collect::<Vec<_>>().join(" ");
     let normalized = normalized.trim_end_matches(',').trim();
     format!("({normalized})")
+}
+
+/// Per-call reference threaded through `run_query`. Same shape as the
+/// Rust extractor's `CallRef`; receiver semantics drive Extracted-trust.
+struct CallRef<'tree> {
+    node: Node<'tree>,
+    name: String,
+    trust_intra_file: bool,
+}
+
+fn ref_call_match<'tree>(
+    m: &tree_sitter::QueryMatch<'_, 'tree>,
+    source: &[u8],
+) -> Option<CallRef<'tree>> {
+    let node = m
+        .captures
+        .iter()
+        .find(|c| c.node.kind() == "identifier")?
+        .node;
+    // Method calls (pattern 3 — `(call function: (attribute ...))`) trust the
+    // intra-file map only when the receiver is `self` or `cls` (i.e. the
+    // enclosing class's implicit receiver). Anything else (`self.field.m()`,
+    // `obj.m()`) emits Unresolved so the resolver can tier.
+    let trust_intra_file = if node.parent().is_some_and(|p| p.kind() == "attribute") {
+        attribute_receiver_is_bare_self(node, source)
+    } else {
+        true
+    };
+    Some(CallRef {
+        node,
+        name: node_text(node, source),
+        trust_intra_file,
+    })
+}
+
+fn attribute_receiver_is_bare_self(method_ident: Node, source: &[u8]) -> bool {
+    let Some(attr) = method_ident.parent().filter(|p| p.kind() == "attribute") else {
+        return false;
+    };
+    let Some(recv) = attr.child_by_field_name("object") else {
+        return false;
+    };
+    if recv.kind() != "identifier" {
+        return false;
+    }
+    let text = node_text(recv, source);
+    PYTHON_BARE_RECEIVERS.contains(&text.as_str())
+}
+
+fn short_name(qualified: &str) -> Option<&str> {
+    qualified.rsplit_once('.').map(|(_, last)| last)
+}
+
+fn find_enclosing_definition<'a>(node: Node, symbols: &'a [Symbol]) -> Option<&'a Symbol> {
+    let start = node.start_byte() as u64;
+    symbols
+        .iter()
+        .filter(|s| s.anchor.start_byte <= start && start < s.anchor.end_byte)
+        .min_by_key(|s| s.anchor.end_byte - s.anchor.start_byte)
+}
+
+/// `Foo(x)` in Python is a class constructor when `Foo` resolves to a class
+/// symbol in the same file. Filter these so they don't appear as a `Foo`
+/// call edge. PascalCase fallback covers external class names (`requests.Session(...)`
+/// captures `Session`); SCREAMING_SNAKE keeps through (see Rust's C7 fix).
+fn is_class_constructor_call(
+    name: &str,
+    symbols_by_short: &std::collections::HashMap<&str, Vec<&Symbol>>,
+) -> bool {
+    let candidates = symbols_by_short.get(name).map(Vec::as_slice).unwrap_or(&[]);
+    if candidates.iter().any(|s| matches!(s.kind, SymbolKind::Struct)) {
+        return true;
+    }
+    let last_segment = name.rsplit('.').next().unwrap_or(name);
+    let pascal_like = last_segment
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase())
+        && !last_segment.contains('_');
+    if pascal_like {
+        let any_callable = candidates.iter().any(|s| {
+            matches!(
+                s.kind,
+                SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
+            )
+        });
+        if !any_callable {
+            return true;
+        }
+    }
+    false
+}
+
+fn pick_extracted_target<'a>(
+    candidates: &[&'a Symbol],
+    call_node: Node,
+    caller: Option<&Symbol>,
+) -> Option<&'a Symbol> {
+    let is_method_call = call_node.parent().is_some_and(|p| p.kind() == "attribute");
+    if is_method_call {
+        // Bare-self method call: restrict to candidates sharing the caller's
+        // class, then dedupe by qualified name so re-extracted duplicates
+        // don't fail uniqueness.
+        let caller_prefix = caller.and_then(|s| impl_type_prefix(&s.qualified_name))?;
+        let matching: Vec<&Symbol> = candidates
+            .iter()
+            .copied()
+            .filter(|s| impl_type_prefix(&s.qualified_name) == Some(caller_prefix))
+            .collect();
+        let distinct_qnames = matching
+            .iter()
+            .map(|s| s.qualified_name.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if distinct_qnames == 1 {
+            matching.first().copied()
+        } else {
+            None
+        }
+    } else {
+        // Bare-name call. Methods need a receiver — filter them out.
+        unique(candidates.iter().copied().filter(|s| {
+            matches!(
+                s.kind,
+                SymbolKind::Function
+                    | SymbolKind::Macro
+                    | SymbolKind::Const
+                    | SymbolKind::Static
+            )
+        }))
+    }
+}
+
+fn unique<T, I: Iterator<Item = T>>(mut it: I) -> Option<T> {
+    let first = it.next()?;
+    if it.next().is_some() { None } else { Some(first) }
+}
+
+fn impl_type_prefix(qualified: &str) -> Option<&str> {
+    qualified.rsplit_once('.').map(|(prefix, _)| prefix)
 }
 
 fn node_text(node: Node, source: &[u8]) -> String {

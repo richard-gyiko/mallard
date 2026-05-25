@@ -34,6 +34,22 @@ fn build_fixture(out: &PathBuf, with_rules: bool) {
     build(req).unwrap();
 }
 
+fn build_python_fixture(out: &PathBuf) {
+    let req = BuildRequest {
+        root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample-python"),
+        sha: "py-fixture".to_string(),
+        rules_path: None,
+        out_path: out.clone(),
+        max_file_bytes: 1024 * 1024,
+        language_allow_list: vec!["python".to_string()],
+        slowest_files_n: 10,
+    };
+    build(req).unwrap();
+}
+
 fn open_reader(index: &PathBuf) -> IndexReader {
     IndexReader::open(index).unwrap()
 }
@@ -547,6 +563,73 @@ fn inherent_plus_trait_impl_same_method_stays_extracted() {
         EdgeConfidence::Extracted,
         "bare self.tag() must collapse inherent+trait `Outer::tag` to one Extracted target"
     );
+}
+
+#[test]
+fn python_method_call_on_self_field_does_not_claim_extracted() {
+    // Gap 2 port: `self.inner.ping()` from Outer.ping must NOT resolve
+    // to Outer.ping (self-recursion). The resolver tiers as Ambiguous
+    // because two `ping` methods exist (Inner.ping + Outer.ping).
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("py-wrapper.duckdb");
+    build_python_fixture(&out);
+    let outer_ping = find_symbol(&out, "wrapper.py", "Outer.ping");
+    let outbound = open_reader(&out)
+        .neighbors(&outer_ping, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+    let bad = outbound.iter().find(|e| {
+        e.confidence == EdgeConfidence::Extracted
+            && e.dst.as_ref().map(|d| d.qualified_name == "Outer.ping").unwrap_or(false)
+    });
+    assert!(bad.is_none(), "self-recursion claim present: {bad:?}");
+    let ping_edge = outbound
+        .iter()
+        .find(|e| {
+            e.dst_unresolved.as_deref() == Some("ping")
+                || e.dst.as_ref().map(|d| d.qualified_name == "Inner.ping").unwrap_or(false)
+        })
+        .expect("ping call edge present");
+    assert!(matches!(
+        ping_edge.confidence,
+        EdgeConfidence::Ambiguous | EdgeConfidence::Inferred
+    ));
+}
+
+#[test]
+fn python_method_call_on_bare_self_stays_extracted() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("py-wrapper-echo.duckdb");
+    build_python_fixture(&out);
+    let echo = find_symbol(&out, "wrapper.py", "Outer.echo");
+    let outbound = open_reader(&out)
+        .neighbors(&echo, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+    let to_outer_ping = outbound
+        .iter()
+        .find(|e| e.dst.as_ref().map(|d| d.qualified_name == "Outer.ping").unwrap_or(false))
+        .expect("echo → Outer.ping edge present");
+    assert_eq!(to_outer_ping.confidence, EdgeConfidence::Extracted);
+}
+
+#[test]
+fn python_bare_name_call_does_not_resolve_to_method() {
+    // C2 port: `solo` exists only as `OnlyMethod.solo` (Method). A bare
+    // `solo()` callsite must not claim Extracted on that method.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("py-wrapper-solo.duckdb");
+    build_python_fixture(&out);
+    let caller = find_symbol(&out, "wrapper.py", "bare_solo_must_not_resolve_to_method");
+    let outbound = open_reader(&out)
+        .neighbors(&caller, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+    let bad = outbound.iter().find(|e| {
+        e.confidence == EdgeConfidence::Extracted
+            && e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "OnlyMethod.solo")
+                .unwrap_or(false)
+    });
+    assert!(bad.is_none(), "bare-name call falsely Extracted to method: {bad:?}");
 }
 
 #[test]
