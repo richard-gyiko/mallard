@@ -39,6 +39,14 @@ pub struct PrReviewRequest {
     /// the caller into JSON. See `docs/research/finding-7-...md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_hunks: Option<DiffHunks>,
+    /// Pattern C (M4 grading): suppress `modified-body-touched` comments
+    /// in test files when the diff hunks cover only 1-2 lines. Test
+    /// fixtures often flip literal values (`262142` → `262146`) — the
+    /// touched-body signal is structurally correct but adds no review
+    /// value. Default `false` keeps the signal on for callers who want
+    /// every overlap surfaced.
+    #[serde(default)]
+    pub ignore_test_trivia: bool,
 }
 
 /// Per-file diff hunks consumed by the review pipeline.
@@ -185,7 +193,15 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
             .and_then(|h| h.files.get(path))
             .map(Vec::as_slice)
             .unwrap_or(empty_hunks.as_slice());
-        review_file(&base, &head, path, hunks, &mut pending, &mut summary)?;
+        review_file(
+            &base,
+            &head,
+            path,
+            hunks,
+            req.ignore_test_trivia,
+            &mut pending,
+            &mut summary,
+        )?;
     }
 
     // Pattern A — container restate suppression. A comment on a
@@ -193,6 +209,15 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
     // is redundant when one of its enclosed leaf symbols also emits in
     // the same file. Drop the container comment.
     suppress_container_restate(&mut pending);
+
+    // Pattern A2 (M4 grading follow-up) — function-in-function restate
+    // suppression. When a Function/Method's anchor strictly encloses
+    // another emitted Function/Method's anchor in the same file, the
+    // outer's comment restates "this function was edited" without the
+    // precision of the inner's. Targets the axios shape where a named
+    // outer fn-expr (`httpAdapter`) wraps the substantive inner fn
+    // (`dispatchHttpRequest`).
+    suppress_outer_function_restate(&mut pending);
 
     let mut comments: Vec<ReviewComment> = pending.into_iter().map(|p| p.comment).collect();
     let total = comments.len();
@@ -263,6 +288,85 @@ fn is_container_kind(kind: Option<SymbolKind>) -> bool {
     )
 }
 
+/// Pattern A2: drop a Function / Method comment whose anchor strictly
+/// encloses another emitted Function / Method comment in the same file.
+/// The outer fn restates "this function was edited"; the inner fn's
+/// comment carries the precise observation. Both must be Fn-family;
+/// containers are handled by Pattern A.
+fn suppress_outer_function_restate(pending: &mut Vec<PendingComment>) {
+    let mut to_drop: Vec<usize> = Vec::new();
+    for (i, outer) in pending.iter().enumerate() {
+        if !is_fn_family(outer.symbol_kind) {
+            continue;
+        }
+        let Some((outer_start, outer_end)) = outer.anchor else {
+            continue;
+        };
+        let encloses_inner_fn = pending.iter().enumerate().any(|(j, inner)| {
+            if i == j || inner.comment.file != outer.comment.file {
+                return false;
+            }
+            if !is_fn_family(inner.symbol_kind) {
+                return false;
+            }
+            let Some((inner_start, inner_end)) = inner.anchor else {
+                return false;
+            };
+            inner_start > outer_start && inner_end < outer_end
+        });
+        if encloses_inner_fn {
+            to_drop.push(i);
+        }
+    }
+    for &i in to_drop.iter().rev() {
+        pending.remove(i);
+    }
+}
+
+fn is_fn_family(kind: Option<SymbolKind>) -> bool {
+    matches!(kind, Some(SymbolKind::Function | SymbolKind::Method))
+}
+
+/// Pattern C: classify a path as test-shaped via filename / directory
+/// conventions across Rust, Python, JS/TS. Conservative — matches the
+/// common patterns; misses exotic naming but the cost is a stray
+/// test-trivia comment, not a wrong claim.
+pub(crate) fn is_test_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    // Directory conventions: tests/ at root or nested.
+    if lower.starts_with("tests/")
+        || lower.starts_with("test/")
+        || lower.contains("/tests/")
+        || lower.contains("/test/")
+        || lower.contains("/__tests__/")
+    {
+        return true;
+    }
+    // Filename conventions.
+    if lower.ends_with("_test.rs")
+        || lower.ends_with(".test.ts")
+        || lower.ends_with(".test.tsx")
+        || lower.ends_with(".test.js")
+        || lower.ends_with(".test.jsx")
+        || lower.ends_with(".spec.ts")
+        || lower.ends_with(".spec.tsx")
+        || lower.ends_with(".spec.js")
+        || lower.ends_with(".spec.jsx")
+    {
+        return true;
+    }
+    // Python test fixture conventions (test_*.py or *_test.py).
+    if let Some(filename) = lower.rsplit('/').next() {
+        if filename.starts_with("test_") && filename.ends_with(".py") {
+            return true;
+        }
+        if filename.ends_with("_test.py") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Pattern D: only emit modified-body-logic for callable kinds. Interfaces,
 /// type aliases, consts, statics carry no "body" in the function sense —
 /// their span-delta framing misleads reviewers.
@@ -278,6 +382,7 @@ fn review_file(
     head: &IndexReader,
     path: &str,
     diff_hunks: &[DiffRange],
+    ignore_test_trivia: bool,
     out: &mut Vec<PendingComment>,
     summary: &mut PrReviewSummary,
 ) -> Result<()> {
@@ -454,6 +559,17 @@ fn review_file(
                 .filter(|r| r.overlaps(sym.anchor.start_line + 1, sym.anchor.end_line + 1))
                 .collect();
             if !overlaps.is_empty() {
+                // Pattern C: in test files, suppress when the overlap
+                // covers ≤2 lines. Test fixtures routinely flip a
+                // literal value or assertion expectation; the touched
+                // signal is structurally correct but noise for review.
+                let total_lines: u32 = overlaps
+                    .iter()
+                    .map(|r| r.end.saturating_sub(r.start) + 1)
+                    .sum();
+                if ignore_test_trivia && is_test_path(&sym.path) && total_lines <= 2 {
+                    continue;
+                }
                 summary.symbols_modified_body += 1;
                 let ranges = overlaps
                     .iter()
@@ -632,6 +748,60 @@ mod precision_tests {
     }
 
     #[test]
+    fn pattern_a2_drops_outer_fn_when_inner_fn_present() {
+        // axios shape: outer named fn-expr (httpAdapter) wraps inner
+        // named fn (dispatchHttpRequest). Both emit modified-body-logic;
+        // the outer's comment is restate-of-diff, drop it.
+        let mut p = vec![
+            pc("a.js", (1000, 5000), Some(SymbolKind::Function), "modified-body-logic"),
+            pc("a.js", (1500, 4500), Some(SymbolKind::Function), "modified-body"),
+        ];
+        suppress_outer_function_restate(&mut p);
+        assert_eq!(p.len(), 1, "outer fn dropped; inner fn kept");
+        // Inner survives — anchor (1500, 4500).
+        assert_eq!(p[0].anchor, Some((1500, 4500)));
+    }
+
+    #[test]
+    fn pattern_a2_does_not_drop_sibling_functions() {
+        // Two non-overlapping fns in the same file — both kept.
+        let mut p = vec![
+            pc("a.js", (1000, 2000), Some(SymbolKind::Function), "modified-body"),
+            pc("a.js", (3000, 4000), Some(SymbolKind::Function), "modified-body"),
+        ];
+        suppress_outer_function_restate(&mut p);
+        assert_eq!(p.len(), 2, "sibling fns both kept");
+    }
+
+    #[test]
+    fn pattern_a2_method_inside_method_drops_outer() {
+        // Method enclosing Method — also covered.
+        let mut p = vec![
+            pc("a.ts", (100, 500), Some(SymbolKind::Method), "modified-body"),
+            pc("a.ts", (200, 300), Some(SymbolKind::Method), "modified-body"),
+        ];
+        suppress_outer_function_restate(&mut p);
+        assert_eq!(p.len(), 1);
+    }
+
+    #[test]
+    fn pattern_c_test_path_classifier() {
+        assert!(is_test_path("tests/foo.rs"));
+        assert!(is_test_path("tests/regression.rs"));
+        assert!(is_test_path("crates/searcher/tests/integration.rs"));
+        assert!(is_test_path("test/foo.py"));
+        assert!(is_test_path("src/__tests__/widget.tsx"));
+        assert!(is_test_path("lib/foo_test.rs"));
+        assert!(is_test_path("lib/components/Button.test.tsx"));
+        assert!(is_test_path("lib/components/Button.spec.ts"));
+        assert!(is_test_path("python/test_widget.py"));
+        assert!(is_test_path("python/widget_test.py"));
+        assert!(!is_test_path("src/foo.rs"));
+        assert!(!is_test_path("lib/widget.ts"));
+        assert!(!is_test_path("src/test_helpers.rs"));
+    }
+
+    #[test]
     fn pattern_a_container_kinds() {
         for k in [
             SymbolKind::Struct,
@@ -667,5 +837,6 @@ pub fn from_paths(
         changed_files,
         max_comments,
         diff_hunks: None,
+        ignore_test_trivia: false,
     })
 }

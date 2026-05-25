@@ -36,6 +36,10 @@ inputs:
     description: "Post the rendered review as a PR comment. Set to 'false' to dry-run."
     required: false
     default: "true"
+  ignore-test-trivia:
+    description: "Suppress modified-body-touched comments on test files whose diff overlap covers ≤2 lines. Default true — small literal flips in test fixtures rarely warrant reviewer attention."
+    required: false
+    default: "true"
 
 outputs:
   review-markdown-path:
@@ -147,6 +151,7 @@ runs:
       env:
         MAX_COMMENTS: ${{ inputs.max-comments }}
         FILES: ${{ steps.files.outputs.files }}
+        IGNORE_TEST_TRIVIA: ${{ inputs.ignore-test-trivia }}
       run: |
         if [ -z "$FILES" ]; then
           echo "No changed files between base and head — skipping review."
@@ -154,12 +159,17 @@ runs:
           echo "comments-emitted=0" >> "$GITHUB_OUTPUT"
           exit 0
         fi
+        TRIVIA_ARG=""
+        if [ "$IGNORE_TEST_TRIVIA" = "true" ]; then
+          TRIVIA_ARG="--ignore-test-trivia"
+        fi
         mallard pr-review \
           --base-db .mallard/base.duckdb \
           --head-db .mallard/head.duckdb \
           --files "$FILES" \
           --diff-hunks .mallard/diff-hunks.json \
           --max-comments "$MAX_COMMENTS" \
+          $TRIVIA_ARG \
           --format json > .mallard/review.json
         mallard pr-review \
           --base-db .mallard/base.duckdb \
@@ -167,6 +177,7 @@ runs:
           --files "$FILES" \
           --diff-hunks .mallard/diff-hunks.json \
           --max-comments "$MAX_COMMENTS" \
+          $TRIVIA_ARG \
           --format markdown > .mallard/review.md
         EMITTED=$(jq -r '.summary.comments_emitted // 0' .mallard/review.json)
         echo "markdown-path=$(pwd)/.mallard/review.md" >> "$GITHUB_OUTPUT"
