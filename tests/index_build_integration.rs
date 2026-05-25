@@ -226,6 +226,39 @@ fn bundled_rules_fire_on_security_grade_python_patterns() {
 }
 
 #[test]
+fn javascript_arrow_and_function_expressions_index_as_function_symbols() {
+    // Finding 8: anonymous-but-named function expressions and
+    // const-bound arrow functions must index as Function symbols. axios
+    // PR #10901's `export default ... && function httpAdapter(c) {}` shape
+    // was invisible to mallard before this fix; pilot v3 left it at 0
+    // comments. After the fix, the same shape in `widget.jsx` becomes a
+    // first-class Function symbol.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("javascript-fn-expr.duckdb");
+    build(javascript_request(out.clone())).unwrap();
+    let conn = Connection::open(&out).unwrap();
+    let arrow_hit = conn
+        .query_row(
+            "SELECT count(*) FROM symbols WHERE qualified_name = ?",
+            ["adornArrow"],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert!(arrow_hit >= 1, "arrow function `adornArrow` should index");
+    let named_fn_expr_hit = conn
+        .query_row(
+            "SELECT count(*) FROM symbols WHERE qualified_name = ?",
+            ["namedFnExpr"],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert!(
+        named_fn_expr_hit >= 1,
+        "named function_expression `namedFnExpr` (axios #10901 shape) should index"
+    );
+}
+
+#[test]
 fn javascript_files_index_via_typescript_grammar() {
     // Pilot Finding 3: `.js` / `.mjs` / `.cjs` / `.jsx` dispatched through
     // the TS / TSX grammar so JavaScript-shop repos (axios, lodash, …)
