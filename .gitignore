@@ -4,6 +4,12 @@
 next.md
 docs/.plans-internal/
 
+# Personal Claude Code / agent workflow skills.
+# Mallard's shipped skill lives at skills/mallard/SKILL.md.
+# Lockfile (skills-lock.json) is tracked so the install set is reproducible.
+.claude/skills/
+.agents/skills/
+
 
 # Added by cargo
 

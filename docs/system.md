@@ -17,8 +17,8 @@ Core thesis: LLMs are strong enough; the bottleneck is repository context retrie
 - **Structural rules engine** — ast-grep rule runner for deterministic findings (anti-patterns, framework rules, lint-like signals).
 - **Retrieval** — Agent-composed via the CLI primitives + Agent Skill in v0; no dedicated built module yet. Symbolic-first stays the policy ([decisions/0004-symbolic-graph-retrieval-over-embeddings-first.md](decisions/0004-symbolic-graph-retrieval-over-embeddings-first.md)); delivery shape per [decisions/0007-defer-retrieval-module-agents-compose-primitives.md](decisions/0007-defer-retrieval-module-agents-compose-primitives.md). Eventual built-module shape sketched in [specs/retrieval/symbolic-graph-retrieval.md](specs/retrieval/symbolic-graph-retrieval.md).
 - **PR reviewer** — Wedge product. Two delivery shapes:
-  - **`mallard pr-review` subcommand** (v1, shipped) — deterministic-only stages 3–5; no LLM call. Consumed by the `mallard-review` composite GitHub Action under `.github/actions/review/`. See [decisions/0011-deterministic-only-pr-review-v1.md](decisions/0011-deterministic-only-pr-review-v1.md).
-  - **Agent skill** — Built as a Claude Code skill that calls `mallard query` primitives + the LLM. Used for richer synthesis when human reviewers want it. See [specs/pr-review/pull-request-review.md](specs/pr-review/pull-request-review.md).
+  - **`mallard pr-review` subcommand** (v1, shipped) — deterministic-only stages 3–5; no LLM call. Consumed by the `mallard-review` composite GitHub Action under `.github/actions/review/`. See [decisions/0011-deterministic-only-pr-review-v1.md](decisions/0011-deterministic-only-pr-review-v1.md) and [decisions/0013-kill-phase-d-pivot-agent-verification.md](decisions/0013-kill-phase-d-pivot-agent-verification.md).
+  - **Agent skill** — Anthropic Agent Skills format manifest at `skills/mallard/SKILL.md`, distributed via [skills.sh](https://www.skills.sh). Agents (Claude Code, Codex CLI, ChatGPT) shell-exec the four agent-facing CLI primitives (`find` / `blast-radius` / `test-seams` / `symbol-diff`). Deterministic output only — no LLM call from mallard's surface.
 
 ## Data flows
 

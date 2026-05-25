@@ -1,6 +1,8 @@
 # Pull-request review
 
-> **Architecture pattern**: see [ADR-0009](../../decisions/0009-pr-review-architecture-pattern.md). The wedge is a layered pipeline (selective retrieval → deterministic analyzers → LLM synthesis → severity-calibrated output → project memory), framed as a *first-pass assistant with human oversight*, not a merge gate. Retrieval is composed by the agent via `mallard query` primitives per [ADR-0007](../../decisions/0007-defer-retrieval-module-agents-compose-primitives.md).
+> **Note on LLM-synthesis layer:** This spec was written before [ADR-0013](../../decisions/0013-kill-phase-d-pivot-agent-verification.md) killed the LLM-synthesis layer. Mallard's permanent product shape is deterministic-only. References below to "LLM synthesis" and "synthesized findings" describe the historical layered-pipeline framing; the shipped product implements only the deterministic stages (3, 4, 5, 7). Agent-facing surfaces ship as plain CLI primitives via the Anthropic Agent Skill at `skills/mallard/SKILL.md`. See [ADR-0013](../../decisions/0013-kill-phase-d-pivot-agent-verification.md) for the rationale.
+>
+> **Architecture pattern (historical framing):** see [ADR-0009](../../decisions/0009-pr-review-architecture-pattern.md). The wedge is a layered pipeline (selective retrieval → deterministic analyzers → LLM synthesis → severity-calibrated output → project memory), framed as a *first-pass assistant with human oversight*, not a merge gate. Retrieval is composed by the agent via `mallard query` primitives per [ADR-0007](../../decisions/0007-defer-retrieval-module-agents-compose-primitives.md).
 
 ## Purpose
 

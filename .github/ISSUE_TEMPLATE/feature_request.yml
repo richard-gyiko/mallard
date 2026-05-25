@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a new CLI primitive, query, language extractor, or structural rule.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can you not do today? What workflow is awkward?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Concrete CLI sketch, JSON shape, or rule spec.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope check
+      description: |
+        Confirm this is in scope (see CONTRIBUTING.md "Out of scope — do NOT submit"). Mallard does NOT do LLM integration, SAST, auto-fix, or per-developer blame.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I read CONTRIBUTING.md and verified this is in scope
+          required: true
+        - label: I searched existing issues + ADRs
+          required: true

@@ -1,0 +1,51 @@
+name: Bug report
+description: Mallard did something wrong, crashed, or produced incorrect output.
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Mallard version
+      description: Output of `mallard --version`.
+      placeholder: "mallard 0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS + Rust toolchain
+      placeholder: "macOS 14.5, rustc 1.92.0"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproducer
+      description: |
+        Smallest repo + command sequence that reproduces. Paste the JSON output you got.
+        Bonus: attach the failing `.duckdb` index as a gist.
+      placeholder: |
+        1. `git clone https://github.com/...`
+        2. `mallard index --sha HEAD --out .mallard/head.duckdb .`
+        3. `mallard query blast-radius --index .mallard/head.duckdb --qname foo`
+        Output: ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+      placeholder: |
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues
+          required: true
+        - label: This is a structural / indexing / query bug, not a security issue (use SECURITY.md for security)
+          required: true
