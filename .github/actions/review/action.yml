@@ -125,6 +125,22 @@ runs:
       run: |
         mallard index --sha "$HEAD_SHA" --out .mallard/head.duckdb $LANG_ARGS $RULES_ARG . >/dev/null
 
+    - name: Compute diff hunks
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base-sha }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+      run: |
+        # `mallard diff-hunks` wraps `git diff --unified=0` and emits the
+        # JSON shape `pr-review --diff-hunks` consumes. Enables Finding-7
+        # `modified-body-touched` detection for single-line guards
+        # inserted inside existing methods (e.g. axios PR #10901).
+        mallard diff-hunks \
+          --base-sha "$BASE_SHA" \
+          --head-sha "$HEAD_SHA" \
+          --repo . \
+          > .mallard/diff-hunks.json
+
     - name: Run pr-review
       id: review
       shell: bash
@@ -142,12 +158,14 @@ runs:
           --base-db .mallard/base.duckdb \
           --head-db .mallard/head.duckdb \
           --files "$FILES" \
+          --diff-hunks .mallard/diff-hunks.json \
           --max-comments "$MAX_COMMENTS" \
           --format json > .mallard/review.json
         mallard pr-review \
           --base-db .mallard/base.duckdb \
           --head-db .mallard/head.duckdb \
           --files "$FILES" \
+          --diff-hunks .mallard/diff-hunks.json \
           --max-comments "$MAX_COMMENTS" \
           --format markdown > .mallard/review.md
         EMITTED=$(jq -r '.summary.comments_emitted // 0' .mallard/review.json)
