@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::EdgeKind;
 use crate::core::{Result, SymbolId, SymbolKind};
 use crate::query::{Direction, FindingFilter, IndexReader, NeighborEdge, SymbolRecord};
-use crate::EdgeKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrReviewRequest {
@@ -107,9 +107,7 @@ pub fn parse_unified_diff_hunks(diff_text: &str) -> DiffHunks {
                 None => continue,
             };
             let after_plus = &rest[plus_idx + 1..];
-            let end = after_plus
-                .find(|c: char| c == ' ' || c == '@')
-                .unwrap_or(after_plus.len());
+            let end = after_plus.find([' ', '@']).unwrap_or(after_plus.len());
             let plus_part = &after_plus[..end];
             let (start_str, count_str) = match plus_part.split_once(',') {
                 Some((s, c)) => (s, c),
@@ -180,8 +178,10 @@ struct PendingComment {
 pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
     let base = IndexReader::open(&req.base_db)?;
     let head = IndexReader::open(&req.head_db)?;
-    let mut summary = PrReviewSummary::default();
-    summary.files_in_scope = req.changed_files.len();
+    let mut summary = PrReviewSummary {
+        files_in_scope: req.changed_files.len(),
+        ..Default::default()
+    };
     let empty_hunks: Vec<DiffRange> = Vec::new();
 
     let mut pending: Vec<PendingComment> = Vec::new();
@@ -542,7 +542,8 @@ fn review_file(
 
         if !added_callees.is_empty() || !removed_callees.is_empty() {
             summary.symbols_modified_body += 1;
-            let body = render_modified_body_comment(&sym.qualified_name, &added_callees, &removed_callees);
+            let body =
+                render_modified_body_comment(&sym.qualified_name, &added_callees, &removed_callees);
             let tier = if head_calls.iter().all(|c| !c.starts_with('[')) {
                 "extracted"
             } else {
@@ -578,7 +579,10 @@ fn review_file(
         // because a field was added).
         let base_sym = base_ids.get(&sym.id.0).expect("stable-id lookup");
         let head_span = sym.anchor.end_byte.saturating_sub(sym.anchor.start_byte);
-        let base_span = base_sym.anchor.end_byte.saturating_sub(base_sym.anchor.start_byte);
+        let base_span = base_sym
+            .anchor
+            .end_byte
+            .saturating_sub(base_sym.anchor.start_byte);
         if head_span != base_span && is_callable_kind(sym.kind) {
             summary.symbols_modified_body += 1;
             out.push(PendingComment {
@@ -745,11 +749,33 @@ pub fn render_markdown(result: &PrReviewResult) -> String {
     buf
 }
 
+/// Helper for tests / CLI callers that have file paths but no env.
+pub fn from_paths(
+    base_db: &Path,
+    head_db: &Path,
+    changed_files: Vec<String>,
+    max_comments: usize,
+) -> Result<PrReviewResult> {
+    run(PrReviewRequest {
+        base_db: base_db.to_path_buf(),
+        head_db: head_db.to_path_buf(),
+        changed_files,
+        max_comments,
+        diff_hunks: None,
+        ignore_test_trivia: false,
+    })
+}
+
 #[cfg(test)]
 mod precision_tests {
     use super::*;
 
-    fn pc(file: &str, span: (u64, u64), kind: Option<SymbolKind>, src_kind: &str) -> PendingComment {
+    fn pc(
+        file: &str,
+        span: (u64, u64),
+        kind: Option<SymbolKind>,
+        src_kind: &str,
+    ) -> PendingComment {
         PendingComment {
             comment: ReviewComment {
                 file: file.to_string(),
@@ -773,8 +799,18 @@ mod precision_tests {
         // The method's comment is the high-signal observation; the
         // class's "body length changed" restates the diff.
         let mut p = vec![
-            pc("a.rs", (0, 1000), Some(SymbolKind::Struct), "modified-body-logic"),
-            pc("a.rs", (100, 500), Some(SymbolKind::Method), "modified-body"),
+            pc(
+                "a.rs",
+                (0, 1000),
+                Some(SymbolKind::Struct),
+                "modified-body-logic",
+            ),
+            pc(
+                "a.rs",
+                (100, 500),
+                Some(SymbolKind::Method),
+                "modified-body",
+            ),
         ];
         suppress_container_restate(&mut p);
         assert_eq!(p.len(), 1, "container dropped; leaf kept");
@@ -784,7 +820,12 @@ mod precision_tests {
     #[test]
     fn pattern_a_keeps_container_when_no_leaf_inside() {
         // Class with span change but no enclosed method emits.
-        let mut p = vec![pc("a.rs", (0, 1000), Some(SymbolKind::Struct), "modified-body-logic")];
+        let mut p = vec![pc(
+            "a.rs",
+            (0, 1000),
+            Some(SymbolKind::Struct),
+            "modified-body-logic",
+        )];
         suppress_container_restate(&mut p);
         assert_eq!(p.len(), 1, "lone container survives — no leaf to defer to");
     }
@@ -792,8 +833,18 @@ mod precision_tests {
     #[test]
     fn pattern_a_does_not_drop_across_files() {
         let mut p = vec![
-            pc("a.rs", (0, 1000), Some(SymbolKind::Struct), "modified-body-logic"),
-            pc("b.rs", (100, 500), Some(SymbolKind::Method), "modified-body"),
+            pc(
+                "a.rs",
+                (0, 1000),
+                Some(SymbolKind::Struct),
+                "modified-body-logic",
+            ),
+            pc(
+                "b.rs",
+                (100, 500),
+                Some(SymbolKind::Method),
+                "modified-body",
+            ),
         ];
         suppress_container_restate(&mut p);
         assert_eq!(p.len(), 2, "different files — no suppression");
@@ -818,8 +869,18 @@ mod precision_tests {
         // named fn (dispatchHttpRequest). Both emit modified-body-logic;
         // the outer's comment is restate-of-diff, drop it.
         let mut p = vec![
-            pc("a.js", (1000, 5000), Some(SymbolKind::Function), "modified-body-logic"),
-            pc("a.js", (1500, 4500), Some(SymbolKind::Function), "modified-body"),
+            pc(
+                "a.js",
+                (1000, 5000),
+                Some(SymbolKind::Function),
+                "modified-body-logic",
+            ),
+            pc(
+                "a.js",
+                (1500, 4500),
+                Some(SymbolKind::Function),
+                "modified-body",
+            ),
         ];
         suppress_outer_function_restate(&mut p);
         assert_eq!(p.len(), 1, "outer fn dropped; inner fn kept");
@@ -833,23 +894,51 @@ mod precision_tests {
         // (outermost) only. B (middle) is meaningful structural
         // evidence — keep. C (innermost) trivially keeps.
         let mut p = vec![
-            pc("a.js", (100, 9000), Some(SymbolKind::Function), "modified-body-logic"), // A
-            pc("a.js", (200, 8000), Some(SymbolKind::Function), "modified-body"),       // B
-            pc("a.js", (500, 1000), Some(SymbolKind::Function), "modified-body-logic"), // C
+            pc(
+                "a.js",
+                (100, 9000),
+                Some(SymbolKind::Function),
+                "modified-body-logic",
+            ), // A
+            pc(
+                "a.js",
+                (200, 8000),
+                Some(SymbolKind::Function),
+                "modified-body",
+            ), // B
+            pc(
+                "a.js",
+                (500, 1000),
+                Some(SymbolKind::Function),
+                "modified-body-logic",
+            ), // C
         ];
         suppress_outer_function_restate(&mut p);
         assert_eq!(p.len(), 2, "outermost dropped; middle + innermost kept");
         let kept_anchors: Vec<_> = p.iter().map(|c| c.anchor).collect();
         assert!(kept_anchors.contains(&Some((200, 8000))), "middle B kept");
-        assert!(kept_anchors.contains(&Some((500, 1000))), "innermost C kept");
+        assert!(
+            kept_anchors.contains(&Some((500, 1000))),
+            "innermost C kept"
+        );
     }
 
     #[test]
     fn pattern_a2_does_not_drop_sibling_functions() {
         // Two non-overlapping fns in the same file — both kept.
         let mut p = vec![
-            pc("a.js", (1000, 2000), Some(SymbolKind::Function), "modified-body"),
-            pc("a.js", (3000, 4000), Some(SymbolKind::Function), "modified-body"),
+            pc(
+                "a.js",
+                (1000, 2000),
+                Some(SymbolKind::Function),
+                "modified-body",
+            ),
+            pc(
+                "a.js",
+                (3000, 4000),
+                Some(SymbolKind::Function),
+                "modified-body",
+            ),
         ];
         suppress_outer_function_restate(&mut p);
         assert_eq!(p.len(), 2, "sibling fns both kept");
@@ -860,11 +949,25 @@ mod precision_tests {
         // Class method `set` containing nested helper `setHeader` —
         // axios #10875 shape. Method is class API surface; never drop.
         let mut p = vec![
-            pc("a.js", (100, 500), Some(SymbolKind::Method), "modified-body-logic"),
-            pc("a.js", (200, 300), Some(SymbolKind::Function), "modified-body-logic"),
+            pc(
+                "a.js",
+                (100, 500),
+                Some(SymbolKind::Method),
+                "modified-body-logic",
+            ),
+            pc(
+                "a.js",
+                (200, 300),
+                Some(SymbolKind::Function),
+                "modified-body-logic",
+            ),
         ];
         suppress_outer_function_restate(&mut p);
-        assert_eq!(p.len(), 2, "Method wrapper preserved; only Functions get dropped");
+        assert_eq!(
+            p.len(),
+            2,
+            "Method wrapper preserved; only Functions get dropped"
+        );
     }
 
     #[test]
@@ -902,24 +1005,11 @@ mod precision_tests {
             SymbolKind::Const,
             SymbolKind::Static,
         ] {
-            assert!(!is_container_kind(Some(k)), "{:?} should NOT be container", k);
+            assert!(
+                !is_container_kind(Some(k)),
+                "{:?} should NOT be container",
+                k
+            );
         }
     }
-}
-
-/// Helper for tests / CLI callers that have file paths but no env.
-pub fn from_paths(
-    base_db: &Path,
-    head_db: &Path,
-    changed_files: Vec<String>,
-    max_comments: usize,
-) -> Result<PrReviewResult> {
-    run(PrReviewRequest {
-        base_db: base_db.to_path_buf(),
-        head_db: head_db.to_path_buf(),
-        changed_files,
-        max_comments,
-        diff_hunks: None,
-        ignore_test_trivia: false,
-    })
 }

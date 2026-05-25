@@ -27,9 +27,7 @@ const SKIP_DIRS: &[&str] = &[".git", ".hg", ".svn", "target", "node_modules"];
 
 pub fn walk(root: &Path, opts: &WalkOptions) -> Vec<WalkEntry> {
     let mut entries: Vec<WalkEntry> = Vec::new();
-    let walker = WalkDir::new(root)
-        .follow_links(false)
-        .sort_by_file_name();
+    let walker = WalkDir::new(root).follow_links(false).sort_by_file_name();
 
     for entry in walker.into_iter().filter_entry(|e| {
         if e.depth() == 0 {

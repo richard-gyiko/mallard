@@ -9,11 +9,8 @@ use crate::rules::RuleSet;
 use crate::store::IndexWriter;
 use crate::walk::{self, WalkOptions};
 
-const EDGE_KINDS_FOR_COUNTERS: &[EdgeKind] = &[
-    EdgeKind::Calls,
-    EdgeKind::Imports,
-    EdgeKind::Contains,
-];
+const EDGE_KINDS_FOR_COUNTERS: &[EdgeKind] =
+    &[EdgeKind::Calls, EdgeKind::Imports, EdgeKind::Contains];
 
 pub fn build(req: BuildRequest) -> Result<BuildSummary> {
     let started = std::time::Instant::now();
@@ -38,7 +35,10 @@ pub fn build(req: BuildRequest) -> Result<BuildSummary> {
     let mut writer = IndexWriter::create(&req.out_path, &metadata)?;
 
     let root = req.root.canonicalize().map_err(|e| {
-        MallardError::InvalidPath(format!("could not canonicalize {}: {e}", req.root.display()))
+        MallardError::InvalidPath(format!(
+            "could not canonicalize {}: {e}",
+            req.root.display()
+        ))
     })?;
     let walk_entries = walk::walk(
         &root,

@@ -135,7 +135,11 @@ pub fn symbol_diff(base: &IndexReader, head: &IndexReader) -> Result<SymbolDiff>
     type Key = (String, String, String);
     let mut base_map: HashMap<Key, Vec<SymbolRecord>> = HashMap::with_capacity(base_syms.len());
     for s in base_syms {
-        let key = (s.qualified_name.clone(), s.path.clone(), s.signature.clone());
+        let key = (
+            s.qualified_name.clone(),
+            s.path.clone(),
+            s.signature.clone(),
+        );
         base_map.entry(key).or_default().push(s);
     }
 
@@ -143,7 +147,11 @@ pub fn symbol_diff(base: &IndexReader, head: &IndexReader) -> Result<SymbolDiff>
     let mut modified = Vec::new();
 
     for h in head_syms {
-        let key = (h.qualified_name.clone(), h.path.clone(), h.signature.clone());
+        let key = (
+            h.qualified_name.clone(),
+            h.path.clone(),
+            h.signature.clone(),
+        );
         match base_map.get_mut(&key) {
             None => added.push(h),
             Some(bucket) if bucket.is_empty() => added.push(h),
@@ -219,7 +227,9 @@ pub struct UnresolvedCallerHit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QueryRequest {
-    LookupSymbol { id: SymbolId },
+    LookupSymbol {
+        id: SymbolId,
+    },
     Neighbors {
         id: SymbolId,
         #[serde(default)]
@@ -237,7 +247,9 @@ pub enum QueryRequest {
         #[serde(flatten)]
         filter: FindingFilter,
     },
-    SymbolsInFile { path: String },
+    SymbolsInFile {
+        path: String,
+    },
     EdgesByFile {
         path: String,
         #[serde(default)]
@@ -249,22 +261,32 @@ pub enum QueryRequest {
         #[serde(default)]
         kinds: Vec<EdgeKind>,
     },
-    ImportersOfFile { path: String },
-    FilesAtPrefix { prefix: String },
+    ImportersOfFile {
+        path: String,
+    },
+    FilesAtPrefix {
+        prefix: String,
+    },
     Metadata,
     /// Find symbols by qualified name. Exact `qualified_name = X` matches rank
     /// first; suffix matches (`*.X`) follow. Agents query by short name when
     /// they don't yet know the full module path.
-    FindByQname { qname: String },
+    FindByQname {
+        qname: String,
+    },
     /// Composite blast-radius lookup by qualified name. Picks the top
     /// `FindByQname` match and returns its callers, callees, and test seams
     /// in one shot — the agent-facing surface for "what breaks if I touch X?"
-    BlastRadius { qname: String },
+    BlastRadius {
+        qname: String,
+    },
     /// Test seams targeting a symbol — inbound callers from files
     /// classified as test files by path or qname convention. Standalone
     /// version of the `BlastRadius.test_seams` slice; useful when the
     /// agent only needs to know "which tests exercise this symbol?"
-    TestSeams { qname: String },
+    TestSeams {
+        qname: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,13 +475,14 @@ impl IndexReader {
             }
             let mut next: Vec<SymbolId> = Vec::new();
             for source_id in &frontier {
-                let edges = neighbors_inner(&self.conn, source_id, &kinds_owned, want_out, want_in)?;
+                let edges =
+                    neighbors_inner(&self.conn, source_id, &kinds_owned, want_out, want_in)?;
                 for e in edges {
-                    if let Some(dst) = &e.dst {
-                        if !visited_nodes.contains_key(&dst.id.0) {
-                            visited_nodes.insert(dst.id.0.clone(), dst.clone());
-                            next.push(dst.id.clone());
-                        }
+                    if let Some(dst) = &e.dst
+                        && !visited_nodes.contains_key(&dst.id.0)
+                    {
+                        visited_nodes.insert(dst.id.0.clone(), dst.clone());
+                        next.push(dst.id.clone());
                     }
                     if !visited_nodes.contains_key(&e.src.id.0) {
                         visited_nodes.insert(e.src.id.0.clone(), e.src.clone());
@@ -546,7 +569,11 @@ impl IndexReader {
             QueryRequest::LookupSymbol { id } => {
                 Ok(QueryResult::LookupSymbol(self.lookup_symbol(id)?))
             }
-            QueryRequest::Neighbors { id, kinds, direction } => Ok(QueryResult::Neighbors(
+            QueryRequest::Neighbors {
+                id,
+                kinds,
+                direction,
+            } => Ok(QueryResult::Neighbors(
                 self.neighbors(id, kinds, *direction)?,
             )),
             QueryRequest::Expand {
@@ -568,9 +595,9 @@ impl IndexReader {
             } => Ok(QueryResult::EdgesByFile(
                 self.edges_by_file(path, kinds, *direction)?,
             )),
-            QueryRequest::UnresolvedCallers { names, kinds } => Ok(
-                QueryResult::UnresolvedCallers(self.unresolved_callers(names, kinds)?),
-            ),
+            QueryRequest::UnresolvedCallers { names, kinds } => Ok(QueryResult::UnresolvedCallers(
+                self.unresolved_callers(names, kinds)?,
+            )),
             QueryRequest::ImportersOfFile { path } => {
                 Ok(QueryResult::ImportersOfFile(self.importers_of_file(path)?))
             }
@@ -685,8 +712,7 @@ impl IndexReader {
                 .expect("symbol_id matches a bundle in this file");
             bundle.outbound.push(NeighborEdge {
                 kind: EdgeKind::from_str(&kind_s).unwrap_or(EdgeKind::Calls),
-                confidence: EdgeConfidence::from_str(&conf_s)
-                    .unwrap_or(EdgeConfidence::Unresolved),
+                confidence: EdgeConfidence::from_str(&conf_s).unwrap_or(EdgeConfidence::Unresolved),
                 direction: Direction::Out,
                 src: src_rec,
                 dst: dst_rec,
@@ -740,8 +766,7 @@ impl IndexReader {
                 .expect("symbol_id matches a bundle in this file");
             bundle.inbound.push(NeighborEdge {
                 kind: EdgeKind::from_str(&kind_s).unwrap_or(EdgeKind::Calls),
-                confidence: EdgeConfidence::from_str(&conf_s)
-                    .unwrap_or(EdgeConfidence::Unresolved),
+                confidence: EdgeConfidence::from_str(&conf_s).unwrap_or(EdgeConfidence::Unresolved),
                 direction: Direction::In,
                 src: src_rec,
                 dst: Some(dst_rec),
@@ -790,8 +815,7 @@ impl IndexReader {
         let rows = stmt.query_map(p_refs.as_slice(), |r| {
             Ok(UnresolvedCallerHit {
                 unresolved_name: r.get::<_, String>(0)?,
-                edge_kind: EdgeKind::from_str(&r.get::<_, String>(1)?)
-                    .unwrap_or(EdgeKind::Calls),
+                edge_kind: EdgeKind::from_str(&r.get::<_, String>(1)?).unwrap_or(EdgeKind::Calls),
                 confidence: EdgeConfidence::from_str(&r.get::<_, String>(2)?)
                     .unwrap_or(EdgeConfidence::Unresolved),
                 caller: read_required_symbol(r, 3)?,
@@ -831,13 +855,14 @@ impl IndexReader {
         Ok(out)
     }
 
-    /// Composite blast-radius: qname → top match → inbound + outbound
-    /// neighbors (all edge kinds) → split into callers/callees/test_seams.
-    /// Test classification uses `pr_review::is_test_symbol` (path conventions
-    /// + qname prefixes), so Rust `mod tests { ... }` is covered without a
-    /// `tests/` directory. Returns `None` only when the qname matches no
-    /// symbol; an isolated symbol with no neighbors yields a
-    /// `BlastRadius` with empty caller/callee lists.
+    /// Composite blast-radius for a qualified-name lookup. Resolves qname
+    /// to the top matching symbol, walks inbound and outbound neighbors
+    /// across all edge kinds, then splits into callers, callees, and test
+    /// seams. Test classification uses `pr_review::is_test_symbol`, so
+    /// Rust `mod tests { ... }` is covered without requiring a literal
+    /// tests directory. Returns `None` only when the qname matches no
+    /// symbol; an isolated symbol with no neighbors yields a `BlastRadius`
+    /// with empty caller and callee lists.
     pub fn blast_radius(&self, qname: &str) -> Result<Option<BlastRadius>> {
         let matches = self.find_by_qname(qname)?;
         let Some(symbol) = matches.first().cloned() else {
@@ -870,7 +895,8 @@ impl IndexReader {
                 }
                 Direction::Out => {
                     if let Some(callee) = e.dst
-                        && seen_callees.insert(callee.id.0.clone()) {
+                        && seen_callees.insert(callee.id.0.clone())
+                    {
                         callees.push(callee);
                     }
                 }
@@ -925,8 +951,7 @@ impl IndexReader {
     }
 
     pub fn importers_of_file(&self, file_path: &str) -> Result<Vec<SymbolRecord>> {
-        let sql = format!(
-            "SELECT DISTINCT src.symbol_id, src.file_id, src_f.path, src.qualified_name, src.kind, src.signature, \
+        let sql = "SELECT DISTINCT src.symbol_id, src.file_id, src_f.path, src.qualified_name, src.kind, src.signature, \
                     src.anchor_start_byte, src.anchor_end_byte, src.anchor_start_line, src.anchor_end_line \
              FROM edges e \
              JOIN symbols src ON src.symbol_id = e.src_symbol_id \
@@ -934,11 +959,12 @@ impl IndexReader {
              JOIN symbols dst ON dst.symbol_id = e.dst_symbol_id \
              JOIN files dst_f ON dst_f.file_id = dst.file_id \
              WHERE e.kind = ? AND dst_f.path = ? \
-             ORDER BY src_f.path, src.anchor_start_byte"
-        );
+             ORDER BY src_f.path, src.anchor_start_byte".to_string();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows =
-            stmt.query_map(params![EdgeKind::Imports.as_str(), file_path], map_symbol_row)?;
+        let rows = stmt.query_map(
+            params![EdgeKind::Imports.as_str(), file_path],
+            map_symbol_row,
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -947,10 +973,7 @@ impl IndexReader {
     }
 }
 
-fn bind_strings_and_kinds(
-    leading: &[&str],
-    kinds: &[EdgeKind],
-) -> Vec<Box<dyn duckdb::ToSql>> {
+fn bind_strings_and_kinds(leading: &[&str], kinds: &[EdgeKind]) -> Vec<Box<dyn duckdb::ToSql>> {
     let mut p: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(leading.len() + kinds.len());
     for s in leading {
         p.push(Box::new(s.to_string()));
@@ -986,7 +1009,10 @@ fn read_required_symbol(row: &duckdb::Row<'_>, base: usize) -> duckdb::Result<Sy
 /// Same layout as `read_required_symbol`, but the JOIN may have produced
 /// NULL columns (LEFT JOIN on edges → symbols). Returns None when the
 /// peer symbol_id is NULL.
-fn read_optional_symbol(row: &duckdb::Row<'_>, base: usize) -> duckdb::Result<Option<SymbolRecord>> {
+fn read_optional_symbol(
+    row: &duckdb::Row<'_>,
+    base: usize,
+) -> duckdb::Result<Option<SymbolRecord>> {
     let id: Option<String> = row.get(base)?;
     let Some(id) = id else { return Ok(None) };
     let kind_str: String = row.get(base + 4)?;

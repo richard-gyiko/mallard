@@ -79,12 +79,7 @@ fn make_request(root: PathBuf, sha: &str, out: PathBuf) -> BuildRequest {
     }
 }
 
-fn make_request_with_rules(
-    root: PathBuf,
-    sha: &str,
-    out: PathBuf,
-    rules: PathBuf,
-) -> BuildRequest {
+fn make_request_with_rules(root: PathBuf, sha: &str, out: PathBuf, rules: PathBuf) -> BuildRequest {
     BuildRequest {
         rules_path: Some(rules),
         rules_bundled: false,
@@ -148,7 +143,10 @@ fn happy_path_indexes_sample_repo() {
     );
 
     let structs = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "struct");
-    assert!(structs >= 1, "expected at least 1 struct (Counter), got {structs}");
+    assert!(
+        structs >= 1,
+        "expected at least 1 struct (Counter), got {structs}"
+    );
 
     let contains = count_where(&conn, tables::EDGES, cols::edges::KIND, "contains");
     assert!(contains > 0, "expected contains edges, got {contains}");
@@ -204,7 +202,10 @@ fn bundled_rules_fire_on_security_grade_python_patterns() {
         summary.counters.findings
     );
     assert!(
-        summary.rule_set_hash.as_ref().is_some_and(|h| h.starts_with("bundled:")),
+        summary
+            .rule_set_hash
+            .as_ref()
+            .is_some_and(|h| h.starts_with("bundled:")),
         "rule_set_hash should carry `bundled:` prefix, got {:?}",
         summary.rule_set_hash
     );
@@ -276,11 +277,17 @@ fn javascript_files_index_via_typescript_grammar() {
     let conn = Connection::open(&out).unwrap();
     // Three different extensions land — verify all three were indexed.
     let total_files = count(&conn, tables::FILES);
-    assert!(total_files >= 3, "expected ≥3 indexed JS-family files, got {total_files}");
+    assert!(
+        total_files >= 3,
+        "expected ≥3 indexed JS-family files, got {total_files}"
+    );
     let calls = count_where(&conn, tables::EDGES, cols::edges::KIND, "calls");
     assert!(calls >= 2, "expected ≥2 calls edges, got {calls}");
     let imports = count_where(&conn, tables::EDGES, cols::edges::KIND, "imports");
-    assert!(imports >= 1, "expected ≥1 imports edge (app.mjs → lib.js), got {imports}");
+    assert!(
+        imports >= 1,
+        "expected ≥1 imports edge (app.mjs → lib.js), got {imports}"
+    );
 }
 
 #[test]
@@ -297,21 +304,36 @@ fn typescript_index_extracts_symbols_and_edges() {
 
     let conn = Connection::open(&out).unwrap();
     let functions = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "function");
-    assert!(functions >= 2, "expected ≥2 functions (double, main, bareSolo…), got {functions}");
+    assert!(
+        functions >= 2,
+        "expected ≥2 functions (double, main, bareSolo…), got {functions}"
+    );
     let methods = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "method");
     assert!(
         methods >= 3,
         "expected ≥3 methods (Counter.bump, Inner.ping, Outer.ping, Outer.echo, …), got {methods}"
     );
     let classes = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "struct");
-    assert!(classes >= 3, "expected ≥3 classes (Counter, Inner, Outer, OnlyMethod), got {classes}");
+    assert!(
+        classes >= 3,
+        "expected ≥3 classes (Counter, Inner, Outer, OnlyMethod), got {classes}"
+    );
     let interfaces = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "trait");
-    assert!(interfaces >= 1, "expected ≥1 interface (Named), got {interfaces}");
+    assert!(
+        interfaces >= 1,
+        "expected ≥1 interface (Named), got {interfaces}"
+    );
 
     let imports = count_where(&conn, tables::EDGES, cols::edges::KIND, "imports");
-    assert!(imports >= 1, "expected ≥1 imports edge (app.ts imports lib), got {imports}");
+    assert!(
+        imports >= 1,
+        "expected ≥1 imports edge (app.ts imports lib), got {imports}"
+    );
     let calls = count_where(&conn, tables::EDGES, cols::edges::KIND, "calls");
-    assert!(calls >= 2, "expected ≥2 calls (double, bump, ping, …), got {calls}");
+    assert!(
+        calls >= 2,
+        "expected ≥2 calls (double, bump, ping, …), got {calls}"
+    );
 }
 
 #[test]
@@ -330,15 +352,36 @@ fn python_rules_produce_findings() {
         summary.counters.findings
     );
     let conn = Connection::open(&out).unwrap();
-    let eval_hits =
-        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "python-eval-use");
-    assert!(eval_hits >= 1, "python-eval-use hit at least once, got {eval_hits}");
-    let exec_hits =
-        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "python-exec-use");
-    assert!(exec_hits >= 1, "python-exec-use hit at least once, got {exec_hits}");
-    let print_hits =
-        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "python-print-call");
-    assert!(print_hits >= 1, "python-print-call hit at least once, got {print_hits}");
+    let eval_hits = count_where(
+        &conn,
+        tables::FINDINGS,
+        cols::findings::RULE_ID,
+        "python-eval-use",
+    );
+    assert!(
+        eval_hits >= 1,
+        "python-eval-use hit at least once, got {eval_hits}"
+    );
+    let exec_hits = count_where(
+        &conn,
+        tables::FINDINGS,
+        cols::findings::RULE_ID,
+        "python-exec-use",
+    );
+    assert!(
+        exec_hits >= 1,
+        "python-exec-use hit at least once, got {exec_hits}"
+    );
+    let print_hits = count_where(
+        &conn,
+        tables::FINDINGS,
+        cols::findings::RULE_ID,
+        "python-print-call",
+    );
+    assert!(
+        print_hits >= 1,
+        "python-print-call hit at least once, got {print_hits}"
+    );
 }
 
 #[test]
@@ -432,19 +475,26 @@ fn rules_produce_findings_and_metadata_hash() {
     let conn = Connection::open(&out).unwrap();
     let total = count(&conn, tables::FINDINGS);
     assert_eq!(
-        total as u64,
-        summary.counters.findings,
+        total as u64, summary.counters.findings,
         "counters.findings matches findings table row count",
     );
 
-    let format_hits =
-        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "rust-format-macro");
+    let format_hits = count_where(
+        &conn,
+        tables::FINDINGS,
+        cols::findings::RULE_ID,
+        "rust-format-macro",
+    );
     assert!(
         format_hits >= 1,
         "expected at least 1 hit for rust-format-macro, got {format_hits}"
     );
-    let println_hits =
-        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "rust-println-macro");
+    let println_hits = count_where(
+        &conn,
+        tables::FINDINGS,
+        cols::findings::RULE_ID,
+        "rust-println-macro",
+    );
     assert!(
         println_hits >= 1,
         "expected at least 1 hit for rust-println-macro, got {println_hits}"
@@ -479,11 +529,17 @@ fn rebuild_is_deterministic() {
 
     let ids_a = symbol_ids(&out_a);
     let ids_b = symbol_ids(&out_b);
-    assert_eq!(ids_a, ids_b, "symbol IDs should be identical across rebuilds");
+    assert_eq!(
+        ids_a, ids_b,
+        "symbol IDs should be identical across rebuilds"
+    );
 
     let edges_a = edge_tuples(&out_a);
     let edges_b = edge_tuples(&out_b);
-    assert_eq!(edges_a, edges_b, "edge content should be identical across rebuilds");
+    assert_eq!(
+        edges_a, edges_b,
+        "edge content should be identical across rebuilds"
+    );
 }
 
 #[test]
@@ -594,7 +650,11 @@ fn symbol_ids(path: &PathBuf) -> Vec<String> {
     rows
 }
 
-fn edge_tuples(path: &PathBuf) -> Vec<(String, Option<String>, Option<String>, String, i64)> {
+/// `(src_symbol_id, dst_symbol_id, dst_unresolved, kind, file_id)` rows
+/// pulled from the edges table for deterministic assertion ordering.
+type EdgeTuple = (String, Option<String>, Option<String>, String, i64);
+
+fn edge_tuples(path: &PathBuf) -> Vec<EdgeTuple> {
     let conn = Connection::open(path).unwrap();
     let mut stmt = conn
         .prepare(&format!(
@@ -607,7 +667,7 @@ fn edge_tuples(path: &PathBuf) -> Vec<(String, Option<String>, Option<String>, S
             e = tables::EDGES,
         ))
         .unwrap();
-    let rows: Vec<(String, Option<String>, Option<String>, String, i64)> = stmt
+    let rows: Vec<EdgeTuple> = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,

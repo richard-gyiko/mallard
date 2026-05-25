@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use duckdb::Connection;
 use mallard::{
@@ -21,13 +21,17 @@ fn fixture_rules() -> PathBuf {
         .join("rules.yml")
 }
 
-fn build_fixture(out: &PathBuf, with_rules: bool) {
+fn build_fixture(out: &Path, with_rules: bool) {
     let req = BuildRequest {
         root: fixture_root(),
         sha: "deadbeefcafe".to_string(),
-        rules_path: if with_rules { Some(fixture_rules()) } else { None },
+        rules_path: if with_rules {
+            Some(fixture_rules())
+        } else {
+            None
+        },
         rules_bundled: false,
-        out_path: out.clone(),
+        out_path: out.to_path_buf(),
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["rust".to_string()],
         slowest_files_n: 10,
@@ -35,7 +39,7 @@ fn build_fixture(out: &PathBuf, with_rules: bool) {
     build(req).unwrap();
 }
 
-fn build_python_fixture(out: &PathBuf) {
+fn build_python_fixture(out: &Path) {
     let req = BuildRequest {
         root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -44,7 +48,7 @@ fn build_python_fixture(out: &PathBuf) {
         sha: "py-fixture".to_string(),
         rules_path: None,
         rules_bundled: false,
-        out_path: out.clone(),
+        out_path: out.to_path_buf(),
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["python".to_string()],
         slowest_files_n: 10,
@@ -52,7 +56,7 @@ fn build_python_fixture(out: &PathBuf) {
     build(req).unwrap();
 }
 
-fn build_typescript_fixture(out: &PathBuf) {
+fn build_typescript_fixture(out: &Path) {
     let req = BuildRequest {
         root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -61,7 +65,7 @@ fn build_typescript_fixture(out: &PathBuf) {
         sha: "ts-fixture".to_string(),
         rules_path: None,
         rules_bundled: false,
-        out_path: out.clone(),
+        out_path: out.to_path_buf(),
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["typescript".to_string(), "tsx".to_string()],
         slowest_files_n: 10,
@@ -69,11 +73,11 @@ fn build_typescript_fixture(out: &PathBuf) {
     build(req).unwrap();
 }
 
-fn open_reader(index: &PathBuf) -> IndexReader {
+fn open_reader(index: &Path) -> IndexReader {
     IndexReader::open(index).unwrap()
 }
 
-fn find_symbol(index: &PathBuf, path: &str, qualified_name: &str) -> SymbolId {
+fn find_symbol(index: &Path, path: &str, qualified_name: &str) -> SymbolId {
     let symbols = open_reader(index).symbols_in_file(path).unwrap();
     symbols
         .into_iter()
@@ -135,7 +139,9 @@ fn find_by_qname_missing_returns_empty() {
     let out = tmp.path().join("index.duckdb");
     build_fixture(&out, false);
 
-    let hits = open_reader(&out).find_by_qname("nonexistent_symbol_xyz").unwrap();
+    let hits = open_reader(&out)
+        .find_by_qname("nonexistent_symbol_xyz")
+        .unwrap();
     assert!(hits.is_empty());
 }
 
@@ -153,9 +159,14 @@ fn blast_radius_returns_callers_and_callees() {
         .expect("blast-radius matches `double`");
     assert_eq!(br.symbol.qualified_name, "double");
     assert!(
-        br.callers.iter().any(|s| s.qualified_name.ends_with("bump")),
+        br.callers
+            .iter()
+            .any(|s| s.qualified_name.ends_with("bump")),
         "expected a `bump` symbol as caller of `double`, got {:?}",
-        br.callers.iter().map(|s| &s.qualified_name).collect::<Vec<_>>()
+        br.callers
+            .iter()
+            .map(|s| &s.qualified_name)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -170,8 +181,16 @@ fn symbol_diff_same_index_returns_empty() {
     let base = open_reader(&base_db);
     let head = open_reader(&head_db);
     let diff = symbol_diff(&base, &head).unwrap();
-    assert!(diff.added.is_empty(), "no adds expected, got {:?}", diff.added);
-    assert!(diff.removed.is_empty(), "no removes expected, got {:?}", diff.removed);
+    assert!(
+        diff.added.is_empty(),
+        "no adds expected, got {:?}",
+        diff.added
+    );
+    assert!(
+        diff.removed.is_empty(),
+        "no removes expected, got {:?}",
+        diff.removed
+    );
     assert!(
         diff.modified.is_empty(),
         "no modifications expected, got {:?}",
@@ -290,10 +309,16 @@ fn neighbors_out_calls_from_bump_reach_double() {
         .unwrap();
     assert!(!edges.is_empty(), "bump should call something");
     let mentions_double = edges.iter().any(|e| {
-        e.dst.as_ref().map(|d| d.qualified_name == "double").unwrap_or(false)
+        e.dst
+            .as_ref()
+            .map(|d| d.qualified_name == "double")
+            .unwrap_or(false)
             || e.dst_unresolved.as_deref() == Some("double")
     });
-    assert!(mentions_double, "expected a calls edge naming double, got {edges:?}");
+    assert!(
+        mentions_double,
+        "expected a calls edge naming double, got {edges:?}"
+    );
 }
 
 #[test]
@@ -419,7 +444,10 @@ fn cross_file_calls_resolve_after_build() {
 
     let cross_file_caller = callers.iter().find(|e| {
         e.src.path == "main.rs"
-            && e.dst.as_ref().map(|d| d.qualified_name == "greet").unwrap_or(false)
+            && e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "greet")
+                .unwrap_or(false)
     });
     assert!(
         cross_file_caller.is_some(),
@@ -443,7 +471,10 @@ fn edges_by_file_returns_bundle_per_symbol_with_edges() {
         .find(|b| b.symbol.qualified_name == "Counter::bump")
         .expect("Counter::bump bundle present");
     let calls_double = bump.outbound.iter().any(|e| {
-        e.dst.as_ref().map(|d| d.qualified_name == "double").unwrap_or(false)
+        e.dst
+            .as_ref()
+            .map(|d| d.qualified_name == "double")
+            .unwrap_or(false)
             || e.dst_unresolved.as_deref() == Some("double")
     });
     assert!(
@@ -488,7 +519,10 @@ fn neighbors_carry_edge_confidence() {
     let to_double = edges
         .iter()
         .find(|e| {
-            e.dst.as_ref().map(|d| d.qualified_name == "double").unwrap_or(false)
+            e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "double")
+                .unwrap_or(false)
         })
         .expect("bump → double edge present");
     assert_eq!(to_double.confidence, EdgeConfidence::Extracted);
@@ -512,7 +546,10 @@ fn method_call_on_self_field_does_not_claim_extracted() {
     // No outbound edge should be Extracted to Outer::ping itself.
     let bad = outbound.iter().find(|e| {
         e.confidence == EdgeConfidence::Extracted
-            && e.dst.as_ref().map(|d| d.qualified_name == "Outer::ping").unwrap_or(false)
+            && e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "Outer::ping")
+                .unwrap_or(false)
     });
     assert!(bad.is_none(), "self-recursion claim present: {bad:?}");
 
@@ -521,7 +558,10 @@ fn method_call_on_self_field_does_not_claim_extracted() {
         .iter()
         .find(|e| {
             e.dst_unresolved.as_deref() == Some("ping")
-                || e.dst.as_ref().map(|d| d.qualified_name == "Inner::ping").unwrap_or(false)
+                || e.dst
+                    .as_ref()
+                    .map(|d| d.qualified_name == "Inner::ping")
+                    .unwrap_or(false)
         })
         .expect("ping call edge present");
     assert!(
@@ -543,16 +583,26 @@ fn nested_macro_in_allowlisted_body_does_not_emit_phantom_call() {
     let out = tmp.path().join("index.duckdb");
     build_fixture(&out, false);
 
-    let caller = find_symbol(&out, "wrapper.rs", "tests::nested_macro_must_not_phantom_call");
+    let caller = find_symbol(
+        &out,
+        "wrapper.rs",
+        "tests::nested_macro_must_not_phantom_call",
+    );
     let outbound = open_reader(&out)
         .neighbors(&caller, &[EdgeKind::Calls], Direction::Out)
         .unwrap();
 
     let bad = outbound.iter().find(|e| {
         e.dst_unresolved.as_deref() == Some("format")
-            || e.dst.as_ref().map(|d| d.qualified_name == "format").unwrap_or(false)
+            || e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "format")
+                .unwrap_or(false)
     });
-    assert!(bad.is_none(), "nested macro emitted as phantom Calls edge: {bad:?}");
+    assert!(
+        bad.is_none(),
+        "nested macro emitted as phantom Calls edge: {bad:?}"
+    );
 }
 
 #[test]
@@ -649,7 +699,12 @@ fn method_call_on_bare_self_stays_extracted() {
 
     let to_outer_ping = outbound
         .iter()
-        .find(|e| e.dst.as_ref().map(|d| d.qualified_name == "Outer::ping").unwrap_or(false))
+        .find(|e| {
+            e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "Outer::ping")
+                .unwrap_or(false)
+        })
         .expect("echo → Outer::ping edge present");
     assert_eq!(to_outer_ping.confidence, EdgeConfidence::Extracted);
 }
@@ -676,7 +731,10 @@ fn bare_name_call_does_not_resolve_to_method() {
                 .map(|d| d.qualified_name == "OnlyMethod::solo")
                 .unwrap_or(false)
     });
-    assert!(bad.is_none(), "bare-name call falsely Extracted to method: {bad:?}");
+    assert!(
+        bad.is_none(),
+        "bare-name call falsely Extracted to method: {bad:?}"
+    );
 }
 
 #[test]
@@ -722,7 +780,12 @@ fn inherent_plus_trait_impl_same_method_stays_extracted() {
 
     let to_tag = outbound
         .iter()
-        .find(|e| e.dst.as_ref().map(|d| d.qualified_name == "Outer::tag").unwrap_or(false))
+        .find(|e| {
+            e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "Outer::tag")
+                .unwrap_or(false)
+        })
         .expect("show_tag → Outer::tag edge present");
     assert_eq!(
         to_tag.confidence,
@@ -745,14 +808,20 @@ fn typescript_method_call_on_this_field_does_not_claim_extracted() {
         .unwrap();
     let bad = outbound.iter().find(|e| {
         e.confidence == EdgeConfidence::Extracted
-            && e.dst.as_ref().map(|d| d.qualified_name == "Outer.ping").unwrap_or(false)
+            && e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "Outer.ping")
+                .unwrap_or(false)
     });
     assert!(bad.is_none(), "this-recursion claim present: {bad:?}");
     let ping_edge = outbound
         .iter()
         .find(|e| {
             e.dst_unresolved.as_deref() == Some("ping")
-                || e.dst.as_ref().map(|d| d.qualified_name == "Inner.ping").unwrap_or(false)
+                || e.dst
+                    .as_ref()
+                    .map(|d| d.qualified_name == "Inner.ping")
+                    .unwrap_or(false)
         })
         .expect("ping call edge present");
     assert!(matches!(
@@ -772,7 +841,12 @@ fn typescript_method_call_on_bare_this_stays_extracted() {
         .unwrap();
     let to_outer_ping = outbound
         .iter()
-        .find(|e| e.dst.as_ref().map(|d| d.qualified_name == "Outer.ping").unwrap_or(false))
+        .find(|e| {
+            e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "Outer.ping")
+                .unwrap_or(false)
+        })
         .expect("echo → Outer.ping edge present");
     assert_eq!(to_outer_ping.confidence, EdgeConfidence::Extracted);
 }
@@ -788,9 +862,15 @@ fn typescript_bare_name_call_does_not_resolve_to_method() {
         .unwrap();
     let bad = outbound.iter().find(|e| {
         e.confidence == EdgeConfidence::Extracted
-            && e.dst.as_ref().map(|d| d.qualified_name == "OnlyMethod.solo").unwrap_or(false)
+            && e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "OnlyMethod.solo")
+                .unwrap_or(false)
     });
-    assert!(bad.is_none(), "bare-name call falsely Extracted to method: {bad:?}");
+    assert!(
+        bad.is_none(),
+        "bare-name call falsely Extracted to method: {bad:?}"
+    );
 }
 
 #[test]
@@ -807,14 +887,20 @@ fn python_method_call_on_self_field_does_not_claim_extracted() {
         .unwrap();
     let bad = outbound.iter().find(|e| {
         e.confidence == EdgeConfidence::Extracted
-            && e.dst.as_ref().map(|d| d.qualified_name == "Outer.ping").unwrap_or(false)
+            && e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "Outer.ping")
+                .unwrap_or(false)
     });
     assert!(bad.is_none(), "self-recursion claim present: {bad:?}");
     let ping_edge = outbound
         .iter()
         .find(|e| {
             e.dst_unresolved.as_deref() == Some("ping")
-                || e.dst.as_ref().map(|d| d.qualified_name == "Inner.ping").unwrap_or(false)
+                || e.dst
+                    .as_ref()
+                    .map(|d| d.qualified_name == "Inner.ping")
+                    .unwrap_or(false)
         })
         .expect("ping call edge present");
     assert!(matches!(
@@ -834,7 +920,12 @@ fn python_method_call_on_bare_self_stays_extracted() {
         .unwrap();
     let to_outer_ping = outbound
         .iter()
-        .find(|e| e.dst.as_ref().map(|d| d.qualified_name == "Outer.ping").unwrap_or(false))
+        .find(|e| {
+            e.dst
+                .as_ref()
+                .map(|d| d.qualified_name == "Outer.ping")
+                .unwrap_or(false)
+        })
         .expect("echo → Outer.ping edge present");
     assert_eq!(to_outer_ping.confidence, EdgeConfidence::Extracted);
 }
@@ -857,7 +948,10 @@ fn python_bare_name_call_does_not_resolve_to_method() {
                 .map(|d| d.qualified_name == "OnlyMethod.solo")
                 .unwrap_or(false)
     });
-    assert!(bad.is_none(), "bare-name call falsely Extracted to method: {bad:?}");
+    assert!(
+        bad.is_none(),
+        "bare-name call falsely Extracted to method: {bad:?}"
+    );
 }
 
 #[test]
@@ -902,9 +996,7 @@ fn unresolved_callers_empty_names_returns_empty() {
     let out = tmp.path().join("index.duckdb");
     build_fixture(&out, false);
 
-    let hits = open_reader(&out)
-        .unresolved_callers(&[], &[])
-        .unwrap();
+    let hits = open_reader(&out).unresolved_callers(&[], &[]).unwrap();
     assert!(hits.is_empty());
 }
 

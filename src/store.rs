@@ -6,7 +6,7 @@ use duckdb::{Connection, params};
 use std::str::FromStr;
 
 use crate::core::{
-    Anchor, Edge, EdgeKind, FileId, FileRecord, Finding, Metadata, MallardError, ParseError,
+    Anchor, Edge, EdgeKind, FileId, FileRecord, Finding, MallardError, Metadata, ParseError,
     ParsedFile, Result, Symbol, SymbolKind,
 };
 use crate::schema::{self, cols, metadata_keys, tables};
@@ -33,10 +33,10 @@ pub struct IndexWriter {
 
 impl IndexWriter {
     pub fn create(final_path: &Path, meta: &Metadata) -> Result<Self> {
-        if let Some(parent) = final_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = final_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let tmp_path = tmp_path_for(final_path);
         match std::fs::remove_file(&tmp_path) {
@@ -307,7 +307,9 @@ impl IndexWriter {
     }
 
     pub fn finalize(self) -> Result<()> {
-        self.conn.close().map_err(|(_, e)| MallardError::DuckDb(e))?;
+        self.conn
+            .close()
+            .map_err(|(_, e)| MallardError::DuckDb(e))?;
         match std::fs::remove_file(&self.final_path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -350,7 +352,12 @@ fn pick_callable_match(candidates: Option<&[(String, SymbolKind)]>) -> Option<Ma
     let candidates = candidates?;
     let callables: Vec<&String> = candidates
         .iter()
-        .filter(|(_, k)| matches!(k, SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro))
+        .filter(|(_, k)| {
+            matches!(
+                k,
+                SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro
+            )
+        })
         .map(|(s, _)| s)
         .collect();
     Some(match callables.len() {

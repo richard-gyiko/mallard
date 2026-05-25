@@ -121,7 +121,13 @@ impl TypeScriptExtractor {
         let by_short = symbols_by_short(&symbols, DOT_SYNTAX.qname_sep);
 
         for r in references {
-            if is_constructor_call(&r.name, &by_short, DOT_SYNTAX.qname_sep, &[], is_ts_type_kind) {
+            if is_constructor_call(
+                &r.name,
+                &by_short,
+                DOT_SYNTAX.qname_sep,
+                &[],
+                is_ts_type_kind,
+            ) {
                 continue;
             }
             let enclosing_sym = find_enclosing_definition(r.node, &symbols);
@@ -129,7 +135,10 @@ impl TypeScriptExtractor {
                 .map(|s| s.id.clone())
                 .unwrap_or_else(|| file_pseudo_src.clone());
             let dst = if r.trust_intra_file {
-                let candidates = by_short.get(r.name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+                let candidates = by_short
+                    .get(r.name.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 pick_extracted_target(candidates, r.node, enclosing_sym).map(|s| s.id.clone())
             } else {
                 None
@@ -336,12 +345,9 @@ fn find_formal_parameters(def_node: Node) -> Option<Node> {
         .child_by_field_name("value")
         .or_else(|| def_node.child_by_field_name("body"))?;
     let mut cursor = value.walk();
-    for child in value.children(&mut cursor) {
-        if child.kind() == "formal_parameters" {
-            return Some(child);
-        }
-    }
-    None
+    value
+        .children(&mut cursor)
+        .find(|&child| child.kind() == "formal_parameters")
 }
 
 fn ref_call_match<'tree>(
@@ -370,7 +376,10 @@ fn ref_call_match<'tree>(
 }
 
 fn member_receiver_is_bare_this(prop_ident: Node) -> bool {
-    let Some(member) = prop_ident.parent().filter(|p| p.kind() == "member_expression") else {
+    let Some(member) = prop_ident
+        .parent()
+        .filter(|p| p.kind() == "member_expression")
+    else {
         return false;
     };
     let Some(obj) = member.child_by_field_name("object") else {

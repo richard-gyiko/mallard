@@ -291,7 +291,6 @@ fn parse_kinds(s: &str) -> anyhow::Result<Vec<EdgeKind>> {
         .collect()
 }
 
-
 fn print<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())

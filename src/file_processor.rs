@@ -2,9 +2,7 @@ use std::str::FromStr;
 
 use ast_grep_language::SupportLang;
 
-use crate::core::{
-    FileId, FileRecord, FileStatus, FileTiming, ParsedFile, ProcessOutcome, Result,
-};
+use crate::core::{FileId, FileRecord, FileStatus, FileTiming, ParsedFile, ProcessOutcome, Result};
 use crate::extractor::{RustExtractor, SymbolExtractor};
 use crate::extractor_python::PythonExtractor;
 use crate::extractor_typescript::TypeScriptExtractor;
@@ -28,7 +26,6 @@ impl FileProcessor {
             rules,
         })
     }
-
 
     pub fn rule_set_hash(&self) -> Option<&str> {
         self.rules.source_hash.as_deref()
@@ -100,7 +97,10 @@ impl FileProcessor {
 
 fn skipped(file_record: FileRecord, status: FileStatus) -> ProcessOutcome {
     ProcessOutcome {
-        file_record: FileRecord { status, ..file_record },
+        file_record: FileRecord {
+            status,
+            ..file_record
+        },
         parsed: None,
         findings: Vec::new(),
         timing: None,
@@ -132,7 +132,9 @@ mod tests {
         let e = entry(&dir, "x.rs", b"pub fn greet() {}\n", Some("rust"));
         let mut fp = FileProcessor::new(RuleSet::empty()).unwrap();
         let out = fp.process(1, &e).unwrap();
-        let parsed = out.parsed.expect("indexed file should produce parsed output");
+        let parsed = out
+            .parsed
+            .expect("indexed file should produce parsed output");
         assert!(parsed.symbols.iter().any(|s| s.qualified_name == "greet"));
         assert!(out.timing.is_some());
         assert_eq!(out.file_record.status, FileStatus::Indexed);
@@ -179,5 +181,4 @@ mod tests {
         let out = fp.process(1, &e).unwrap();
         assert_eq!(out.file_record.status, FileStatus::SkippedExtension);
     }
-
 }

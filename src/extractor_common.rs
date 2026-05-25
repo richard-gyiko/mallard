@@ -44,7 +44,11 @@ pub fn node_anchor(node: Node) -> Anchor {
 /// Return the sole item from `it` if it yields exactly one, else None.
 pub fn unique<T, I: Iterator<Item = T>>(mut it: I) -> Option<T> {
     let first = it.next()?;
-    if it.next().is_some() { None } else { Some(first) }
+    if it.next().is_some() {
+        None
+    } else {
+        Some(first)
+    }
 }
 
 /// Normalise a parameter-list source slice: trim, strip outer parens,

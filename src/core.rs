@@ -12,7 +12,12 @@ pub type FileId = i64;
 pub struct SymbolId(pub String);
 
 impl SymbolId {
-    pub fn compute(file_path: &str, qualified_name: &str, kind: SymbolKind, signature: &str) -> Self {
+    pub fn compute(
+        file_path: &str,
+        qualified_name: &str,
+        kind: SymbolKind,
+        signature: &str,
+    ) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(file_path.as_bytes());
         hasher.update(&[0]);
@@ -88,7 +93,11 @@ impl FromStr for SymbolKind {
             "field" => SymbolKind::Field,
             "variant" => SymbolKind::Variant,
             "other" => SymbolKind::Other,
-            _ => return Err(MallardError::MalformedRow(format!("unknown symbol kind {s:?}"))),
+            _ => {
+                return Err(MallardError::MalformedRow(format!(
+                    "unknown symbol kind {s:?}"
+                )));
+            }
         })
     }
 }
@@ -176,7 +185,11 @@ impl FromStr for EdgeKind {
             "contains" => EdgeKind::Contains,
             "tests_for" => EdgeKind::TestsFor,
             "tested_by" => EdgeKind::TestedBy,
-            _ => return Err(MallardError::MalformedRow(format!("unknown edge kind {s:?}"))),
+            _ => {
+                return Err(MallardError::MalformedRow(format!(
+                    "unknown edge kind {s:?}"
+                )));
+            }
         })
     }
 }
@@ -261,7 +274,11 @@ impl FromStr for FileStatus {
             "skipped:binary" => FileStatus::SkippedBinary,
             "skipped:symlink" => FileStatus::SkippedSymlink,
             "skipped:extension" => FileStatus::SkippedExtension,
-            _ => return Err(MallardError::MalformedRow(format!("unknown file status {s:?}"))),
+            _ => {
+                return Err(MallardError::MalformedRow(format!(
+                    "unknown file status {s:?}"
+                )));
+            }
         })
     }
 }

@@ -104,7 +104,13 @@ impl PythonExtractor {
         // class-constructor filter, per-call confidence tiering, and
         // impl-prefix scoping for bare-self method calls.
         for r in references {
-            if is_constructor_call(&r.name, &by_short, DOT_SYNTAX.qname_sep, &[], is_py_type_kind) {
+            if is_constructor_call(
+                &r.name,
+                &by_short,
+                DOT_SYNTAX.qname_sep,
+                &[],
+                is_py_type_kind,
+            ) {
                 continue;
             }
             let enclosing_sym = find_enclosing_definition(r.node, &symbols);
@@ -112,7 +118,10 @@ impl PythonExtractor {
                 .map(|s| s.id.clone())
                 .unwrap_or_else(|| file_pseudo_src.clone());
             let dst = if r.trust_intra_file {
-                let candidates = by_short.get(r.name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+                let candidates = by_short
+                    .get(r.name.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 pick_extracted_target(candidates, r.node, enclosing_sym).map(|s| s.id.clone())
             } else {
                 None

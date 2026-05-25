@@ -80,7 +80,9 @@ impl RustExtractor {
             let pattern = m.pattern_index;
             match pattern {
                 0..=8 => {
-                    if let Some(sym) = build_symbol_match(m, pattern, source, file_id, relative_path) {
+                    if let Some(sym) =
+                        build_symbol_match(m, pattern, source, file_id, relative_path)
+                    {
                         symbols.push(sym);
                     }
                 }
@@ -156,7 +158,10 @@ impl RustExtractor {
             // and let the post-build resolver tier (Inferred / Ambiguous /
             // Unresolved). See ADR-0010 and `ref_call_match`.
             let dst = if r.trust_intra_file {
-                let candidates = by_short.get(r.name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+                let candidates = by_short
+                    .get(r.name.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 pick_extracted_target(candidates, r.node, enclosing_sym).map(|s| s.id.clone())
             } else {
                 None
@@ -374,11 +379,7 @@ fn walk_token_tree_for_calls<'tree>(
 /// push an appropriate `CallRef`. Anonymous siblings of the identifier
 /// (`!`, `.`, `::`) disambiguate the call site shape — see the doc on
 /// `collect_macro_body_calls`.
-fn emit_macro_body_call<'tree>(
-    ident: Node<'tree>,
-    source: &[u8],
-    out: &mut Vec<CallRef<'tree>>,
-) {
+fn emit_macro_body_call<'tree>(ident: Node<'tree>, source: &[u8], out: &mut Vec<CallRef<'tree>>) {
     if ident.next_sibling().is_some_and(|n| n.kind() == "!") {
         return;
     }

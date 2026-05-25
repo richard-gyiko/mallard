@@ -66,7 +66,10 @@ fn pr_review_emits_structural_rule_comments_on_changed_files() {
         .comments
         .iter()
         .any(|c| c.confidence_tier == "structural-rule" && c.rule_id.is_some());
-    assert!(any_structural, "expected at least one structural-rule comment");
+    assert!(
+        any_structural,
+        "expected at least one structural-rule comment"
+    );
 }
 
 #[test]
@@ -80,7 +83,11 @@ fn pr_review_respects_max_comments_budget() {
     let result = pr_review::run(PrReviewRequest {
         base_db,
         head_db,
-        changed_files: vec!["main.rs".to_string(), "greet.rs".to_string(), "lib.rs".to_string()],
+        changed_files: vec![
+            "main.rs".to_string(),
+            "greet.rs".to_string(),
+            "lib.rs".to_string(),
+        ],
         max_comments: 1,
         diff_hunks: None,
         ignore_test_trivia: false,
@@ -119,13 +126,23 @@ diff --git a/src/bar.py b/src/bar.py\n\
 +y\n\
 ";
     let hunks = mallard::pr_review::parse_unified_diff_hunks(diff);
-    let foo = hunks.files.get("src/foo.rs").expect("src/foo.rs hunks present");
-    assert_eq!(foo.len(), 2, "deletion-only hunk skipped, two head-side hunks remain");
+    let foo = hunks
+        .files
+        .get("src/foo.rs")
+        .expect("src/foo.rs hunks present");
+    assert_eq!(
+        foo.len(),
+        2,
+        "deletion-only hunk skipped, two head-side hunks remain"
+    );
     assert_eq!(foo[0].start, 10);
     assert_eq!(foo[0].end, 12);
     assert_eq!(foo[1].start, 43);
     assert_eq!(foo[1].end, 43);
-    let bar = hunks.files.get("src/bar.py").expect("src/bar.py hunks present");
+    let bar = hunks
+        .files
+        .get("src/bar.py")
+        .expect("src/bar.py hunks present");
     assert_eq!(bar.len(), 1);
     assert_eq!(bar[0].start, 5);
     assert_eq!(bar[0].end, 5);
@@ -144,7 +161,10 @@ fn diff_hunks_overlap_emits_modified_body_touched() {
     let bump_line = {
         let reader = mallard::IndexReader::open(&head_db).unwrap();
         let syms = reader.symbols_in_file("lib.rs").unwrap();
-        let bump = syms.iter().find(|s| s.qualified_name == "Counter::bump").unwrap();
+        let bump = syms
+            .iter()
+            .find(|s| s.qualified_name == "Counter::bump")
+            .unwrap();
         bump.anchor.start_line + 1
     };
 
@@ -215,7 +235,10 @@ fn pattern_b_structural_rule_gated_by_diff_hunk_overlap() {
     let mut files = HashMap::new();
     files.insert(
         "greet.rs".to_string(),
-        vec![mallard::pr_review::DiffRange { start: 999, end: 1000 }],
+        vec![mallard::pr_review::DiffRange {
+            start: 999,
+            end: 1000,
+        }],
     );
     let gated = mallard::pr_review::run(mallard::pr_review::PrReviewRequest {
         base_db,
@@ -256,5 +279,8 @@ fn pr_review_markdown_render_includes_badge() {
     .unwrap();
     let md = pr_review::render_markdown(&result);
     assert!(md.contains("# mallard PR review"));
-    assert!(md.contains("[structural-rule]"), "badge prefix present in markdown");
+    assert!(
+        md.contains("[structural-rule]"),
+        "badge prefix present in markdown"
+    );
 }

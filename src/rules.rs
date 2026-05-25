@@ -205,7 +205,8 @@ rules:
 "#,
         );
         let rs = RuleSet::load(f.path()).unwrap();
-        let parsed = parse_rust("fn f() {\n    a.unwrap();\n    b.expect(\"x\");\n    c.unwrap();\n}\n");
+        let parsed =
+            parse_rust("fn f() {\n    a.unwrap();\n    b.expect(\"x\");\n    c.unwrap();\n}\n");
         let findings = rs.run(1, &parsed);
         let ids: Vec<&str> = findings.iter().map(|f| f.rule_id.as_str()).collect();
         let lines: Vec<u32> = findings.iter().map(|f| f.start_line).collect();
