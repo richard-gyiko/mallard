@@ -147,7 +147,10 @@ fn review_file(
     summary.symbols_removed += removed.len();
 
     // Stage 4 — outbound-edge diff per stable-ID symbol. Modified-body
-    // comments cite the changed callee names.
+    // comments cite the changed callee names. Pure-logic body changes
+    // (callee set unchanged but anchor byte-span changed → lines added /
+    // removed inside the body) emit a separate `modified-body-logic`
+    // signal at `inferred` tier. Pilot Finding 4.
     let stable_ids: Vec<&SymbolRecord> = head_syms
         .iter()
         .filter(|s| base_ids.contains_key(&s.id.0))
@@ -165,30 +168,55 @@ fn review_file(
             .filter(|n| !head_calls.contains(n))
             .cloned()
             .collect();
-        if added_callees.is_empty() && removed_callees.is_empty() {
+
+        if !added_callees.is_empty() || !removed_callees.is_empty() {
+            summary.symbols_modified_body += 1;
+            let body = render_modified_body_comment(&sym.qualified_name, &added_callees, &removed_callees);
+            let tier = if head_calls.iter().all(|c| !c.starts_with('[')) {
+                "extracted"
+            } else {
+                "inferred"
+            };
+            out.push(ReviewComment {
+                file: sym.path.clone(),
+                line: sym.anchor.start_line,
+                end_line: sym.anchor.end_line,
+                symbol_qualified_name: Some(sym.qualified_name.clone()),
+                symbol_id: Some(sym.id.0.clone()),
+                source_kind: "modified-body".to_string(),
+                confidence_tier: tier.to_string(),
+                rule_id: None,
+                body,
+            });
             continue;
         }
-        summary.symbols_modified_body += 1;
-        let body = render_modified_body_comment(&sym.qualified_name, &added_callees, &removed_callees);
-        // Confidence tier inherits from the strongest edge delta. For
-        // deterministic-only output we tag `extracted` when the calls
-        // are intra-file resolved on the head side, else `inferred`.
-        let tier = if head_calls.iter().all(|c| !c.starts_with('[')) {
-            "extracted"
-        } else {
-            "inferred"
-        };
-        out.push(ReviewComment {
-            file: sym.path.clone(),
-            line: sym.anchor.start_line,
-            end_line: sym.anchor.end_line,
-            symbol_qualified_name: Some(sym.qualified_name.clone()),
-            symbol_id: Some(sym.id.0.clone()),
-            source_kind: "modified-body".to_string(),
-            confidence_tier: tier.to_string(),
-            rule_id: None,
-            body,
-        });
+
+        // Pure-logic body change: callee set identical but anchor byte
+        // span changed → lines added / removed inside the body without
+        // adding new outbound calls. Anchor end_line shifts too, so use
+        // both base + head anchors. The `inferred` tier signals "we know
+        // the body changed; we don't know the semantic impact."
+        let base_sym = base_ids.get(&sym.id.0).expect("stable-id lookup");
+        let head_span = sym.anchor.end_byte.saturating_sub(sym.anchor.start_byte);
+        let base_span = base_sym.anchor.end_byte.saturating_sub(base_sym.anchor.start_byte);
+        if head_span != base_span {
+            summary.symbols_modified_body += 1;
+            out.push(ReviewComment {
+                file: sym.path.clone(),
+                line: sym.anchor.start_line,
+                end_line: sym.anchor.end_line,
+                symbol_qualified_name: Some(sym.qualified_name.clone()),
+                symbol_id: Some(sym.id.0.clone()),
+                source_kind: "modified-body-logic".to_string(),
+                confidence_tier: "inferred".to_string(),
+                rule_id: None,
+                body: format!(
+                    "`{}` body length changed ({} → {} bytes) with the outbound call set intact. \
+                    Pure-logic / control-flow change — manual review recommended.",
+                    sym.qualified_name, base_span, head_span
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -233,7 +261,8 @@ fn render_modified_body_comment(
 }
 
 fn tier_priority(tier: &str) -> u32 {
-    // Lower number = higher priority (kept under budget).
+    // Lower number = higher priority (kept under budget). Sort key for
+    // comment-budget truncation when over `max_comments`.
     match tier {
         "structural-rule" => 0,
         "extracted" => 1,
