@@ -53,6 +53,7 @@ fn pr_review_emits_structural_rule_comments_on_changed_files() {
         changed_files: vec!["main.rs".to_string(), "greet.rs".to_string()],
         max_comments: 20,
         diff_hunks: None,
+        ignore_test_trivia: false,
     })
     .unwrap();
 
@@ -82,6 +83,7 @@ fn pr_review_respects_max_comments_budget() {
         changed_files: vec!["main.rs".to_string(), "greet.rs".to_string(), "lib.rs".to_string()],
         max_comments: 1,
         diff_hunks: None,
+        ignore_test_trivia: false,
     })
     .unwrap();
     assert_eq!(result.comments.len(), 1, "budget should cap at 1");
@@ -161,6 +163,7 @@ fn diff_hunks_overlap_emits_modified_body_touched() {
         changed_files: vec!["lib.rs".to_string()],
         max_comments: 20,
         diff_hunks: Some(mallard::pr_review::DiffHunks { files }),
+        ignore_test_trivia: false,
     })
     .unwrap();
 
@@ -194,6 +197,7 @@ fn pattern_b_structural_rule_gated_by_diff_hunk_overlap() {
         changed_files: vec!["greet.rs".to_string()],
         max_comments: 20,
         diff_hunks: None,
+        ignore_test_trivia: false,
     })
     .unwrap();
     let baseline_rule_hits = baseline
@@ -219,6 +223,7 @@ fn pattern_b_structural_rule_gated_by_diff_hunk_overlap() {
         changed_files: vec!["greet.rs".to_string()],
         max_comments: 20,
         diff_hunks: Some(mallard::pr_review::DiffHunks { files }),
+        ignore_test_trivia: false,
     })
     .unwrap();
     let gated_rule_hits = gated
@@ -246,6 +251,7 @@ fn pr_review_markdown_render_includes_badge() {
         changed_files: vec!["greet.rs".to_string()],
         max_comments: 5,
         diff_hunks: None,
+        ignore_test_trivia: false,
     })
     .unwrap();
     let md = pr_review::render_markdown(&result);
