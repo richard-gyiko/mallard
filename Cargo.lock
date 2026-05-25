@@ -1405,6 +1405,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-python 0.23.6",
  "tree-sitter-rust",
+ "tree-sitter-typescript",
  "walkdir",
 ]
 

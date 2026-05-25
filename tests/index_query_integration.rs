@@ -50,6 +50,22 @@ fn build_python_fixture(out: &PathBuf) {
     build(req).unwrap();
 }
 
+fn build_typescript_fixture(out: &PathBuf) {
+    let req = BuildRequest {
+        root: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sample-typescript"),
+        sha: "ts-fixture".to_string(),
+        rules_path: None,
+        out_path: out.clone(),
+        max_file_bytes: 1024 * 1024,
+        language_allow_list: vec!["typescript".to_string(), "tsx".to_string()],
+        slowest_files_n: 10,
+    };
+    build(req).unwrap();
+}
+
 fn open_reader(index: &PathBuf) -> IndexReader {
     IndexReader::open(index).unwrap()
 }
@@ -563,6 +579,68 @@ fn inherent_plus_trait_impl_same_method_stays_extracted() {
         EdgeConfidence::Extracted,
         "bare self.tag() must collapse inherent+trait `Outer::tag` to one Extracted target"
     );
+}
+
+#[test]
+fn typescript_method_call_on_this_field_does_not_claim_extracted() {
+    // Gap 2 / C4 port: `this.inner.ping()` from Outer.ping must NOT
+    // resolve to Outer.ping. Receiver is `this.inner` (Inner), not bare
+    // `this`. Two `ping` methods → resolver tiers Ambiguous.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("ts-wrapper.duckdb");
+    build_typescript_fixture(&out);
+    let outer_ping = find_symbol(&out, "wrapper.ts", "Outer.ping");
+    let outbound = open_reader(&out)
+        .neighbors(&outer_ping, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+    let bad = outbound.iter().find(|e| {
+        e.confidence == EdgeConfidence::Extracted
+            && e.dst.as_ref().map(|d| d.qualified_name == "Outer.ping").unwrap_or(false)
+    });
+    assert!(bad.is_none(), "this-recursion claim present: {bad:?}");
+    let ping_edge = outbound
+        .iter()
+        .find(|e| {
+            e.dst_unresolved.as_deref() == Some("ping")
+                || e.dst.as_ref().map(|d| d.qualified_name == "Inner.ping").unwrap_or(false)
+        })
+        .expect("ping call edge present");
+    assert!(matches!(
+        ping_edge.confidence,
+        EdgeConfidence::Ambiguous | EdgeConfidence::Inferred
+    ));
+}
+
+#[test]
+fn typescript_method_call_on_bare_this_stays_extracted() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("ts-wrapper-echo.duckdb");
+    build_typescript_fixture(&out);
+    let echo = find_symbol(&out, "wrapper.ts", "Outer.echo");
+    let outbound = open_reader(&out)
+        .neighbors(&echo, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+    let to_outer_ping = outbound
+        .iter()
+        .find(|e| e.dst.as_ref().map(|d| d.qualified_name == "Outer.ping").unwrap_or(false))
+        .expect("echo → Outer.ping edge present");
+    assert_eq!(to_outer_ping.confidence, EdgeConfidence::Extracted);
+}
+
+#[test]
+fn typescript_bare_name_call_does_not_resolve_to_method() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("ts-wrapper-solo.duckdb");
+    build_typescript_fixture(&out);
+    let caller = find_symbol(&out, "wrapper.ts", "bareSoloMustNotResolveToMethod");
+    let outbound = open_reader(&out)
+        .neighbors(&caller, &[EdgeKind::Calls], Direction::Out)
+        .unwrap();
+    let bad = outbound.iter().find(|e| {
+        e.confidence == EdgeConfidence::Extracted
+            && e.dst.as_ref().map(|d| d.qualified_name == "OnlyMethod.solo").unwrap_or(false)
+    });
+    assert!(bad.is_none(), "bare-name call falsely Extracted to method: {bad:?}");
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use ast_grep_language::SupportLang;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 use crate::core::{
@@ -12,39 +13,46 @@ use crate::extractor_common::{
 use crate::parse_errors;
 use crate::parsed_source::ParsedSource;
 
-const PYTHON_QUERY: &str = r#"
-(function_definition name: (identifier) @def.function.name) @def.function
+/// Shared symbol + reference query — patterns are valid for both the
+/// TypeScript and TSX grammars (TSX is a superset that only adds JSX
+/// nodes; our captures don't touch those).
+const TS_QUERY: &str = r#"
+(function_declaration name: (identifier) @def.function.name) @def.function
 
-(class_definition name: (identifier) @def.class.name) @def.class
+(class_declaration name: (type_identifier) @def.class.name) @def.class
 
-(call function: (identifier) @ref.call.simple) @ref.call
+(interface_declaration name: (type_identifier) @def.interface.name) @def.interface
 
-(call function: (attribute attribute: (identifier) @ref.call.method)) @ref.call
+(type_alias_declaration name: (type_identifier) @def.type_alias.name) @def.type_alias
+
+(method_definition name: (property_identifier) @def.method.name) @def.method
+
+(call_expression function: (identifier) @ref.call.simple) @ref.call
+
+(call_expression function: (member_expression property: (property_identifier) @ref.call.method)) @ref.call
 
 (import_statement) @import.decl
-
-(import_from_statement) @import.decl
 "#;
 
-/// Python identifiers commonly used as the implicit receiver for instance
-/// (`self`) or class (`cls`) methods. Bare-receiver method calls trust the
-/// intra-file map; anything else (`self.<field>.method()`, `obj.method()`)
-/// emits Unresolved so the post-build resolver can tier.
-const PYTHON_BARE_RECEIVERS: &[&str] = &["self", "cls"];
-
-/// Python `SymbolExtractor`. Mirrors the Rust extractor's shape — see
-/// [`crate::extractor::RustExtractor`].
-pub struct PythonExtractor {
-    query: Query,
+/// TypeScript / TSX `SymbolExtractor`. Holds two pre-compiled Query
+/// instances since `tree_sitter::Query` is bound to a specific Language;
+/// the TSX grammar is identical to TS for the patterns we extract but
+/// loaded under a different language pointer.
+pub struct TypeScriptExtractor {
+    query_ts: Query,
+    query_tsx: Query,
     cursor: QueryCursor,
 }
 
-impl PythonExtractor {
+impl TypeScriptExtractor {
     pub fn new() -> Result<Self> {
-        let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
-        let query = Query::new(&language, PYTHON_QUERY)?;
-        Ok(PythonExtractor {
-            query,
+        let lang_ts: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        let lang_tsx: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+        let query_ts = Query::new(&lang_ts, TS_QUERY)?;
+        let query_tsx = Query::new(&lang_tsx, TS_QUERY)?;
+        Ok(TypeScriptExtractor {
+            query_ts,
+            query_tsx,
             cursor: QueryCursor::new(),
         })
     }
@@ -55,27 +63,33 @@ impl PythonExtractor {
         source: &[u8],
         file_id: FileId,
         relative_path: &str,
+        language: SupportLang,
     ) -> (Vec<Symbol>, Vec<Edge>) {
         let mut symbols: Vec<Symbol> = Vec::new();
         let mut references: Vec<CallRef> = Vec::new();
         let mut imports: Vec<(Node, String)> = Vec::new();
 
-        let mut matches = self.cursor.matches(&self.query, root, source);
+        let query = if matches!(language, SupportLang::Tsx) {
+            &self.query_tsx
+        } else {
+            &self.query_ts
+        };
+        let mut matches = self.cursor.matches(query, root, source);
         while let Some(m) = matches.next() {
             match m.pattern_index {
-                0 | 1 => {
+                0..=4 => {
                     if let Some(sym) =
                         build_symbol_match(m, m.pattern_index, source, file_id, relative_path)
                     {
                         symbols.push(sym);
                     }
                 }
-                2 | 3 => {
+                5 | 6 => {
                     if let Some(r) = ref_call_match(m, source) {
                         references.push(r);
                     }
                 }
-                4 | 5 => {
+                7 => {
                     if let Some(node) = m.captures.first().map(|c| c.node) {
                         imports.push((node, node_text(node, source)));
                     }
@@ -100,11 +114,8 @@ impl PythonExtractor {
 
         let by_short = symbols_by_short(&symbols, DOT_SYNTAX.qname_sep);
 
-        // Mirrors `RustExtractor` post wedge-dogfood-1 + C2/C4/C7 fixes:
-        // class-constructor filter, per-call confidence tiering, and
-        // impl-prefix scoping for bare-self method calls.
         for r in references {
-            if is_constructor_call(&r.name, &by_short, DOT_SYNTAX.qname_sep, &[], is_py_type_kind) {
+            if is_constructor_call(&r.name, &by_short, DOT_SYNTAX.qname_sep, &[], is_ts_type_kind) {
                 continue;
             }
             let enclosing_sym = find_enclosing_definition(r.node, &symbols);
@@ -152,12 +163,13 @@ impl PythonExtractor {
     }
 }
 
-impl SymbolExtractor for PythonExtractor {
+impl SymbolExtractor for TypeScriptExtractor {
     fn extract(&mut self, parsed: &ParsedSource) -> ParsedFile {
         let source = parsed.source().as_bytes();
         let root = parsed.ts_root();
         let file_id = parsed.file_id();
         let relative_path = parsed.relative_path();
+        let language = parsed.language();
 
         let mut parse_errors: Vec<ParseError> = Vec::new();
         if root.has_error() {
@@ -165,7 +177,7 @@ impl SymbolExtractor for PythonExtractor {
         }
 
         let t_query = std::time::Instant::now();
-        let (symbols, edges) = self.run_query(root, source, file_id, relative_path);
+        let (symbols, edges) = self.run_query(root, source, file_id, relative_path, language);
         let query_ms = t_query.elapsed().as_millis() as u64;
 
         ParsedFile {
@@ -179,11 +191,19 @@ impl SymbolExtractor for PythonExtractor {
     }
 }
 
-/// Python constructor filter is class-only: a same-file `class Foo:` shadowed
-/// by `Foo(x)` is the canonical case. PascalCase fallback in
-/// `is_constructor_call` covers external classes.
-fn is_py_type_kind(kind: SymbolKind) -> bool {
-    matches!(kind, SymbolKind::Struct)
+struct CallRef<'tree> {
+    node: Node<'tree>,
+    name: String,
+    trust_intra_file: bool,
+}
+
+/// Type-kind set treated as a constructor under same-file capture:
+/// classes (Struct), interfaces (Trait), and type aliases.
+fn is_ts_type_kind(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Struct | SymbolKind::Trait | SymbolKind::TypeAlias
+    )
 }
 
 fn build_symbol_match<'tree>(
@@ -193,48 +213,33 @@ fn build_symbol_match<'tree>(
     file_id: FileId,
     relative_path: &str,
 ) -> Option<Symbol> {
-    // pattern 0 → function_definition (may be method if enclosed in class)
-    // pattern 1 → class_definition (mapped to SymbolKind::Struct, same shape
-    // as the Rust extractor — class carries methods, like a struct does)
+    // 0 → function_declaration, 1 → class, 2 → interface, 3 → type_alias,
+    // 4 → method_definition. Interfaces map to SymbolKind::Trait (closest
+    // semantic match; both define a contract that other types implement).
     let initial_kind = match pattern {
         0 => SymbolKind::Function,
         1 => SymbolKind::Struct,
+        2 => SymbolKind::Trait,
+        3 => SymbolKind::TypeAlias,
+        4 => SymbolKind::Method,
         _ => return None,
     };
     let (name_node, def_node) = pick_name_and_def(m)?;
     let name = node_text(name_node, source);
-    let kind = if matches!(initial_kind, SymbolKind::Function) && is_method(def_node) {
-        SymbolKind::Method
-    } else {
-        initial_kind
-    };
-    let qualified_name = compute_qualified_name(def_node, &name, kind, source);
-    let signature = compute_signature(def_node, source, kind);
+    let qualified_name = compute_qualified_name(def_node, &name, initial_kind, source);
+    let signature = compute_signature(def_node, source, initial_kind);
     let anchor = node_anchor(def_node);
-    let id = SymbolId::compute(relative_path, &qualified_name, kind, &signature);
+    let id = SymbolId::compute(relative_path, &qualified_name, initial_kind, &signature);
     Some(Symbol {
         id,
         file_id,
         qualified_name,
-        kind,
+        kind: initial_kind,
         signature,
         anchor,
     })
 }
 
-/// True when a `function_definition` lives inside a `class_definition`.
-fn is_method(def_node: Node) -> bool {
-    let mut cur = def_node.parent();
-    while let Some(p) = cur {
-        if p.kind() == "class_definition" {
-            return true;
-        }
-        cur = p.parent();
-    }
-    false
-}
-
-/// Methods qualify as `Class.method`; module-level fns/classes stay bare.
 fn compute_qualified_name(def_node: Node, name: &str, kind: SymbolKind, source: &[u8]) -> String {
     if matches!(kind, SymbolKind::Method)
         && let Some(class) = enclosing_class_name(def_node, source)
@@ -247,7 +252,7 @@ fn compute_qualified_name(def_node: Node, name: &str, kind: SymbolKind, source: 
 fn enclosing_class_name(def_node: Node, source: &[u8]) -> Option<String> {
     let mut cur = def_node.parent();
     while let Some(p) = cur {
-        if p.kind() == "class_definition"
+        if p.kind() == "class_declaration"
             && let Some(name_node) = p.child_by_field_name("name")
         {
             return Some(node_text(name_node, source));
@@ -263,34 +268,28 @@ fn compute_signature(def_node: Node, source: &[u8], kind: SymbolKind) -> String 
     }
     let mut cursor = def_node.walk();
     for child in def_node.children(&mut cursor) {
-        if child.kind() == "parameters" {
+        if child.kind() == "formal_parameters" {
             return canonical_params(node_text(child, source));
         }
     }
     String::new()
 }
 
-/// Per-call reference threaded through `run_query`. Receiver semantics drive
-/// Extracted-trust.
-struct CallRef<'tree> {
-    node: Node<'tree>,
-    name: String,
-    trust_intra_file: bool,
-}
-
 fn ref_call_match<'tree>(
     m: &tree_sitter::QueryMatch<'_, 'tree>,
     source: &[u8],
 ) -> Option<CallRef<'tree>> {
-    let node = m
+    let name_capture = m
         .captures
         .iter()
-        .find(|c| c.node.kind() == "identifier")?
-        .node;
-    // Method calls (pattern 3 — `(call function: (attribute ...))`) trust the
-    // intra-file map only when the receiver is `self` or `cls`.
-    let trust_intra_file = if node.parent().is_some_and(|p| p.kind() == "attribute") {
-        attribute_receiver_is_bare_self(node, source)
+        .find(|c| matches!(c.node.kind(), "identifier" | "property_identifier"))?;
+    let node = name_capture.node;
+    // Method calls (`(member_expression property: ...)`) trust the intra-file
+    // map only when the receiver is bare `this`. Anything else
+    // (`this.field.foo()`, `obj.foo()`) emits Unresolved so the post-build
+    // resolver tiers — same shape as Rust Gap 2 + Python self/cls.
+    let trust_intra_file = if node.kind() == "property_identifier" {
+        member_receiver_is_bare_this(node)
     } else {
         true
     };
@@ -301,18 +300,14 @@ fn ref_call_match<'tree>(
     })
 }
 
-fn attribute_receiver_is_bare_self(method_ident: Node, source: &[u8]) -> bool {
-    let Some(attr) = method_ident.parent().filter(|p| p.kind() == "attribute") else {
+fn member_receiver_is_bare_this(prop_ident: Node) -> bool {
+    let Some(member) = prop_ident.parent().filter(|p| p.kind() == "member_expression") else {
         return false;
     };
-    let Some(recv) = attr.child_by_field_name("object") else {
+    let Some(obj) = member.child_by_field_name("object") else {
         return false;
     };
-    if recv.kind() != "identifier" {
-        return false;
-    }
-    let text = node_text(recv, source);
-    PYTHON_BARE_RECEIVERS.contains(&text.as_str())
+    obj.kind() == "this"
 }
 
 fn pick_extracted_target<'a>(
@@ -320,8 +315,7 @@ fn pick_extracted_target<'a>(
     call_node: Node,
     caller: Option<&Symbol>,
 ) -> Option<&'a Symbol> {
-    let is_method_call = call_node.parent().is_some_and(|p| p.kind() == "attribute");
-    if is_method_call {
+    if call_node.kind() == "property_identifier" {
         pick_method_target(candidates, caller, DOT_SYNTAX.qname_sep)
     } else {
         unique(candidates.iter().copied().filter(|s| {

@@ -1,8 +1,12 @@
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 use crate::core::{
-    Anchor, Edge, EdgeConfidence, EdgeKind, FileId, ParseError, ParsedFile, Result, Symbol,
-    SymbolId, SymbolKind,
+    Edge, EdgeConfidence, EdgeKind, FileId, ParseError, ParsedFile, Result, Symbol, SymbolId,
+    SymbolKind,
+};
+use crate::extractor_common::{
+    RUST_SYNTAX, canonical_params, find_enclosing_definition, is_constructor_call, node_anchor,
+    node_text, pick_method_target, pick_name_and_def, symbols_by_short, unique,
 };
 use crate::parsed_source::ParsedSource;
 
@@ -110,12 +114,7 @@ impl RustExtractor {
 
         let mut edges: Vec<Edge> = Vec::new();
 
-        let mut symbols_by_short: std::collections::HashMap<&str, Vec<&Symbol>> =
-            std::collections::HashMap::with_capacity(symbols.len());
-        for s in &symbols {
-            let key = short_name(&s.qualified_name).unwrap_or(s.qualified_name.as_str());
-            symbols_by_short.entry(key).or_default().push(s);
-        }
+        let by_short = symbols_by_short(&symbols, RUST_SYNTAX.qname_sep);
 
         let file_pseudo_src = SymbolId(format!("file:{}", relative_path));
         for sym in &symbols {
@@ -134,10 +133,18 @@ impl RustExtractor {
         // call_expression grammar can't distinguish `Ok(x)` (variant) from
         // `f(x)` (function) without name resolution — heuristic: drop if the
         // call name is a stdlib variant constructor, matches a same-file
-        // type definition, or is PascalCase with no same-file function /
-        // method / macro of the same name.
+        // type definition, or is PascalCase with no same-file callable of
+        // the same name (see `is_constructor_call`).
         for r in references {
-            if r.kind == EdgeKind::Calls && is_constructor_call(&r.name, &symbols_by_short) {
+            if r.kind == EdgeKind::Calls
+                && is_constructor_call(
+                    &r.name,
+                    &by_short,
+                    RUST_SYNTAX.qname_sep,
+                    STDLIB_VARIANT_CONSTRUCTORS,
+                    is_rust_type_kind,
+                )
+            {
                 continue;
             }
             let enclosing_sym = find_enclosing_definition(r.node, &symbols);
@@ -149,10 +156,7 @@ impl RustExtractor {
             // and let the post-build resolver tier (Inferred / Ambiguous /
             // Unresolved). See ADR-0010 and `ref_call_match`.
             let dst = if r.trust_intra_file {
-                let candidates = symbols_by_short
-                    .get(r.name.as_str())
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
+                let candidates = by_short.get(r.name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
                 pick_extracted_target(candidates, r.node, enclosing_sym).map(|s| s.id.clone())
             } else {
                 None
@@ -225,6 +229,14 @@ impl SymbolExtractor for RustExtractor {
     }
 }
 
+/// Rust type-kind set for the shared constructor filter.
+fn is_rust_type_kind(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::TypeAlias
+    )
+}
+
 fn build_symbol_match<'tree>(
     m: &tree_sitter::QueryMatch<'_, 'tree>,
     pattern: usize,
@@ -273,39 +285,12 @@ fn build_symbol_match<'tree>(
     })
 }
 
-fn pick_name_and_def<'tree>(
-    m: &tree_sitter::QueryMatch<'_, 'tree>,
-) -> Option<(Node<'tree>, Node<'tree>)> {
-    let mut smallest: Option<Node> = None;
-    let mut largest: Option<Node> = None;
-    for c in m.captures {
-        let n = c.node;
-        let span = n.end_byte().saturating_sub(n.start_byte());
-        match smallest {
-            None => smallest = Some(n),
-            Some(s) if span < s.end_byte().saturating_sub(s.start_byte()) => smallest = Some(n),
-            _ => {}
-        }
-        match largest {
-            None => largest = Some(n),
-            Some(l) if span > l.end_byte().saturating_sub(l.start_byte()) => largest = Some(n),
-            _ => {}
-        }
-    }
-    Some((smallest?, largest?))
-}
-
 /// Extract `(macro_name, macro_invocation_node)` from a pattern-12/13 match.
-/// The macro name is the text of the `@ref.macro.name` identifier capture;
-/// the macro_invocation node is the largest `@ref.macro` capture.
 fn macro_invocation_match<'tree>(
     m: &tree_sitter::QueryMatch<'_, 'tree>,
     source: &[u8],
 ) -> Option<(String, Node<'tree>)> {
-    let name_capture = m
-        .captures
-        .iter()
-        .find(|c| c.node.kind() == "identifier")?;
+    let name_capture = m.captures.iter().find(|c| c.node.kind() == "identifier")?;
     let invocation = m
         .captures
         .iter()
@@ -344,10 +329,7 @@ const MACRO_BODY_MAX_DEPTH: u32 = 64;
 /// - identifier preceded by anonymous `::` and a prior identifier → emit
 ///   the qualified name `Type::method`, letting the resolver use its
 ///   `by_qualified` index.
-/// - identifier followed by anonymous `!` → nested macro invocation inside
-///   the outer macro body; skip (tree-sitter doesn't re-parse the inner
-///   macro, but the surrounding `identifier`-then-`token_tree` shape would
-///   otherwise be misclassified as a fn call).
+/// - identifier followed by anonymous `!` → nested macro invocation; skip.
 /// - everything else → free-function shape, emit Unresolved.
 fn collect_macro_body_calls<'tree>(
     macro_invocation: Node<'tree>,
@@ -372,9 +354,6 @@ fn walk_token_tree_for_calls<'tree>(
     if depth >= MACRO_BODY_MAX_DEPTH {
         return;
     }
-    // Single forward pass: remember the most recent `identifier` child and
-    // emit a call ref when the next named sibling is a `token_tree` (the
-    // `name(args)` shape). Recurse into nested token_trees.
     let mut cursor = token_tree.walk();
     let mut pending_ident: Option<Node<'tree>> = None;
     for child in token_tree.named_children(&mut cursor) {
@@ -400,20 +379,13 @@ fn emit_macro_body_call<'tree>(
     source: &[u8],
     out: &mut Vec<CallRef<'tree>>,
 ) {
-    // Nested macro invocation: identifier immediately followed (including
-    // anonymous siblings) by `!`, then `token_tree`. Skip — it's not a fn
-    // call, and the inner macro body isn't parsed.
-    if ident
-        .next_sibling()
-        .is_some_and(|n| n.kind() == "!")
-    {
+    if ident.next_sibling().is_some_and(|n| n.kind() == "!") {
         return;
     }
 
     let prev = ident.prev_sibling();
 
-    // `Type::method(...)` shape — emit qualified name. Walk back across the
-    // anonymous `::` to the prior identifier (which is the Type segment).
+    // `Type::method(...)` shape — emit qualified name.
     if let Some(p) = prev
         && p.kind() == "::"
         && let Some(type_ident) = p.prev_sibling()
@@ -431,10 +403,8 @@ fn emit_macro_body_call<'tree>(
         return;
     }
 
-    // `receiver.method(...)` shape — method position. Receiver type isn't
-    // tracked, so a globally-unique short name match would mis-Infer. Emit
-    // with `inhibit_resolver = true` so the parser tier marks Ambiguous and
-    // the post-build resolver leaves it alone.
+    // `receiver.method(...)` shape — method position; receiver type isn't
+    // tracked, so emit Ambiguous (resolver leaves it alone).
     let method_position = prev.is_some_and(|p| p.kind() == ".");
 
     out.push(CallRef {
@@ -458,8 +428,7 @@ fn ref_call_match<'tree>(
     let name = node_text(node, source);
     // Trust the per-file short-name map only when the receiver type matches
     // the enclosing impl block. For method calls (`field_identifier`), that's
-    // true iff the receiver is bare `self` — `self.foo()` resolves within the
-    // same impl, `self.field.foo()` does not. Bare-name (`identifier`) and
+    // true iff the receiver is bare `self`. Bare-name (`identifier`) and
     // scoped (`Type::name`) calls have no receiver, so the intra-file map is
     // the right place to look.
     let trust_intra_file = if node.kind() == "field_identifier" {
@@ -470,9 +439,6 @@ fn ref_call_match<'tree>(
     Some((node, name, trust_intra_file))
 }
 
-/// True when a `field_identifier` capture corresponds to a method call whose
-/// receiver is bare `self`. Walks up to the enclosing `field_expression` and
-/// inspects its `value` field.
 fn method_call_receiver_is_bare_self(field_identifier: Node) -> bool {
     field_identifier
         .parent()
@@ -482,10 +448,10 @@ fn method_call_receiver_is_bare_self(field_identifier: Node) -> bool {
 }
 
 fn compute_qualified_name(def_node: Node, name: &str, kind: SymbolKind, source: &[u8]) -> String {
-    if matches!(kind, SymbolKind::Function) {
-        if let Some(impl_type) = enclosing_impl_type(def_node, source) {
-            return format!("{impl_type}::{name}");
-        }
+    if matches!(kind, SymbolKind::Function)
+        && let Some(impl_type) = enclosing_impl_type(def_node, source)
+    {
+        return format!("{impl_type}::{name}");
     }
     let modules = enclosing_module_path(def_node, source);
     if modules.is_empty() {
@@ -499,10 +465,10 @@ fn enclosing_module_path(def_node: Node, source: &[u8]) -> Vec<String> {
     let mut path: Vec<String> = Vec::new();
     let mut cur = def_node.parent();
     while let Some(p) = cur {
-        if p.kind() == "mod_item" {
-            if let Some(name_node) = p.child_by_field_name("name") {
-                path.push(node_text(name_node, source));
-            }
+        if p.kind() == "mod_item"
+            && let Some(name_node) = p.child_by_field_name("name")
+        {
+            path.push(node_text(name_node, source));
         }
         cur = p.parent();
     }
@@ -553,100 +519,29 @@ const MACRO_BODY_EXPRESSION_ALLOWLIST: &[&str] = &[
     "writeln",
 ];
 
-fn is_constructor_call(
-    name: &str,
-    symbols_by_short: &std::collections::HashMap<&str, Vec<&Symbol>>,
-) -> bool {
-    if STDLIB_VARIANT_CONSTRUCTORS.contains(&name) {
-        return true;
-    }
-    let candidates = symbols_by_short.get(name).map(Vec::as_slice).unwrap_or(&[]);
-    let any_type_def = candidates.iter().any(|s| {
-        matches!(
-            s.kind,
-            SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::TypeAlias
-        )
-    });
-    if any_type_def {
-        return true;
-    }
-    // PascalCase identifiers that aren't a known callable in this file are
-    // very likely scoped variant constructors (e.g. `QueryRequest::LookupSymbol(x)`
-    // captures `LookupSymbol`). Rust functions and methods are snake_case;
-    // SCREAMING_SNAKE_CASE consts are uppercase-leading but contain `_`, so
-    // exclude them from the heuristic to keep `CONST_HANDLER()`-style calls.
-    // Check the rightmost segment so qualified names from macro-body
-    // extraction (`Builder::make`) aren't misclassified by their type prefix.
-    let last_segment = name.rsplit("::").next().unwrap_or(name);
-    let pascal_case = last_segment
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_uppercase())
-        && !last_segment.contains('_');
-    if pascal_case {
-        let any_callable = candidates.iter().any(|s| {
-            matches!(
-                s.kind,
-                SymbolKind::Function
-                    | SymbolKind::Method
-                    | SymbolKind::Macro
-                    | SymbolKind::Const
-                    | SymbolKind::Static
-            )
-        });
-        if !any_callable {
-            return true;
-        }
-    }
-    false
-}
-
 /// Disambiguate intra-file short-name candidates for an Extracted match.
 ///
 /// For a method call (`field_identifier` capture) we require the candidate to
-/// share the caller's impl-type prefix — i.e. live in the same `impl` block.
-/// For a bare-name function call (`identifier`) we accept only a unique
-/// callable candidate; multiple shorts are ambiguous → let the resolver tier.
+/// share the caller's impl-type prefix. For a bare-name or scoped call we
+/// pick the sole callable candidate; multiple matches → Unresolved. Scoped
+/// (`Type::name`) calls additionally admit `Method` candidates since UFCS /
+/// associated-function syntax can reach `&self` methods, while bare-name
+/// cannot.
 fn pick_extracted_target<'a>(
     candidates: &[&'a Symbol],
     call_node: Node,
     caller: Option<&Symbol>,
 ) -> Option<&'a Symbol> {
     if call_node.kind() == "field_identifier" {
-        // Bare-self method call (ref_call_match enforces this). Accept a
-        // candidate only if it lives in the caller's impl. Two impls of the
-        // same `Foo::name` (inherent + trait) collide under the impl-type
-        // prefix; dedupe by qualified_name so inherent/trait pairs collapse
-        // to a single target rather than regressing to Unresolved.
-        let caller_prefix = caller.and_then(|s| impl_type_prefix(&s.qualified_name))?;
-        let matching: Vec<&Symbol> = candidates
-            .iter()
-            .copied()
-            .filter(|s| impl_type_prefix(&s.qualified_name) == Some(caller_prefix))
-            .collect();
-        let distinct_qnames = matching
-            .iter()
-            .map(|s| s.qualified_name.as_str())
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        if distinct_qnames == 1 {
-            matching.first().copied()
-        } else {
-            None
-        }
+        pick_method_target(candidates, caller, RUST_SYNTAX.qname_sep)
     } else {
-        // Bare-name (`identifier`) vs scoped (`Type::name`) — both leaf
-        // captures are `identifier`-kind; parent distinguishes. A bare-name
-        // call has no receiver and cannot reach a `&self` method; a scoped
-        // call (UFCS / associated function) can. Restrict callable kinds
-        // accordingly to avoid false-Extracted to methods from bare names.
         let is_scoped = call_node
             .parent()
             .is_some_and(|p| p.kind() == "scoped_identifier");
         // Const / Static can hold a fn-pointer value and are callable via
         // bare or scoped paths — `const HANDLER: fn() = my_handler;
-        // HANDLER()`. Include them so the previously-Extracted edge to
-        // such items survives the kind-filter introduced for C2.
+        // HANDLER()`. Include them so previously-Extracted edges to such
+        // items survive the kind-filter introduced for C2.
         unique(candidates.iter().copied().filter(|s| {
             if is_scoped {
                 matches!(
@@ -670,29 +565,6 @@ fn pick_extracted_target<'a>(
     }
 }
 
-/// Return the sole item from `it` if it yields exactly one, else None.
-fn unique<T, I: Iterator<Item = T>>(mut it: I) -> Option<T> {
-    let first = it.next()?;
-    if it.next().is_some() { None } else { Some(first) }
-}
-
-/// The `Type` portion of a `Type::method` qualified name. None for bare
-/// (module-level) symbols.
-fn impl_type_prefix(qualified: &str) -> Option<&str> {
-    qualified.rsplit_once("::").map(|(prefix, _)| prefix)
-}
-
-fn canonical_params(text: String) -> String {
-    let trimmed = text.trim();
-    let inner = trimmed
-        .strip_prefix('(')
-        .and_then(|s| s.strip_suffix(')'))
-        .unwrap_or(trimmed);
-    let normalized = inner.split_whitespace().collect::<Vec<_>>().join(" ");
-    let normalized = normalized.trim_end_matches(',').trim();
-    format!("({normalized})")
-}
-
 fn is_method(def_node: Node) -> bool {
     let mut cur = def_node.parent();
     while let Some(p) = cur {
@@ -714,38 +586,9 @@ fn enclosing_impl_type(def_node: Node, source: &[u8]) -> Option<String> {
             return Some(node_text(type_node, source));
         }
         if p.kind() == "trait_item" {
-            return p
-                .child_by_field_name("name")
-                .map(|n| node_text(n, source));
+            return p.child_by_field_name("name").map(|n| node_text(n, source));
         }
         cur = p.parent();
     }
     None
 }
-
-fn short_name(qualified: &str) -> Option<&str> {
-    qualified.rsplit_once("::").map(|(_, last)| last)
-}
-
-fn find_enclosing_definition<'a>(node: Node, symbols: &'a [Symbol]) -> Option<&'a Symbol> {
-    let start = node.start_byte() as u64;
-    symbols
-        .iter()
-        .filter(|s| s.anchor.start_byte <= start && start < s.anchor.end_byte)
-        .min_by_key(|s| s.anchor.end_byte - s.anchor.start_byte)
-}
-
-fn node_text(node: Node, source: &[u8]) -> String {
-    String::from_utf8_lossy(&source[node.start_byte()..node.end_byte()]).into_owned()
-}
-
-fn node_anchor(node: Node) -> Anchor {
-    Anchor {
-        start_byte: node.start_byte() as u64,
-        end_byte: node.end_byte() as u64,
-        start_line: node.start_position().row as u32,
-        end_line: node.end_position().row as u32,
-    }
-}
-
-

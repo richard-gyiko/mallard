@@ -7,6 +7,7 @@ use crate::core::{
 };
 use crate::extractor::{RustExtractor, SymbolExtractor};
 use crate::extractor_python::PythonExtractor;
+use crate::extractor_typescript::TypeScriptExtractor;
 use crate::parsed_source::ParsedSource;
 use crate::rules::RuleSet;
 use crate::walk::WalkEntry;
@@ -14,6 +15,7 @@ use crate::walk::WalkEntry;
 pub struct FileProcessor {
     rust: RustExtractor,
     python: PythonExtractor,
+    typescript: TypeScriptExtractor,
     rules: RuleSet,
 }
 
@@ -22,6 +24,7 @@ impl FileProcessor {
         Ok(FileProcessor {
             rust: RustExtractor::new()?,
             python: PythonExtractor::new()?,
+            typescript: TypeScriptExtractor::new()?,
             rules,
         })
     }
@@ -66,6 +69,7 @@ impl FileProcessor {
         let extractor: &mut dyn SymbolExtractor = match lang {
             SupportLang::Rust => &mut self.rust,
             SupportLang::Python => &mut self.python,
+            SupportLang::TypeScript | SupportLang::Tsx => &mut self.typescript,
             _ => return Ok(skipped(file_record, FileStatus::SkippedExtension)),
         };
 

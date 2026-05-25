@@ -19,6 +19,25 @@ fn python_fixture_root() -> PathBuf {
         .join("sample-python")
 }
 
+fn typescript_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("sample-typescript")
+}
+
+fn typescript_request(out: PathBuf) -> BuildRequest {
+    BuildRequest {
+        root: typescript_fixture_root(),
+        sha: "ts-fixture".to_string(),
+        rules_path: None,
+        out_path: out,
+        max_file_bytes: 1024 * 1024,
+        language_allow_list: vec!["typescript".to_string(), "tsx".to_string()],
+        slowest_files_n: 10,
+    }
+}
+
 fn fixture_rules() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -137,6 +156,37 @@ fn python_request(out: PathBuf) -> BuildRequest {
         language_allow_list: vec!["python".to_string()],
         slowest_files_n: 10,
     }
+}
+
+#[test]
+fn typescript_index_extracts_symbols_and_edges() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("typescript.duckdb");
+    let summary = build(typescript_request(out.clone())).unwrap();
+    assert!(out.exists(), "ts index file written");
+    assert!(
+        summary.counters.symbols >= 6,
+        "expected ≥6 symbols (double, Counter, bump, Named, CounterFactory, main, Inner+ping, Outer+ping+echo, ...), got {}",
+        summary.counters.symbols
+    );
+
+    let conn = Connection::open(&out).unwrap();
+    let functions = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "function");
+    assert!(functions >= 2, "expected ≥2 functions (double, main, bareSolo…), got {functions}");
+    let methods = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "method");
+    assert!(
+        methods >= 3,
+        "expected ≥3 methods (Counter.bump, Inner.ping, Outer.ping, Outer.echo, …), got {methods}"
+    );
+    let classes = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "struct");
+    assert!(classes >= 3, "expected ≥3 classes (Counter, Inner, Outer, OnlyMethod), got {classes}");
+    let interfaces = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "trait");
+    assert!(interfaces >= 1, "expected ≥1 interface (Named), got {interfaces}");
+
+    let imports = count_where(&conn, tables::EDGES, cols::edges::KIND, "imports");
+    assert!(imports >= 1, "expected ≥1 imports edge (app.ts imports lib), got {imports}");
+    let calls = count_where(&conn, tables::EDGES, cols::edges::KIND, "calls");
+    assert!(calls >= 2, "expected ≥2 calls (double, bump, ping, …), got {calls}");
 }
 
 #[test]
