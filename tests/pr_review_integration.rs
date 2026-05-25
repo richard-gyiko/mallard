@@ -174,6 +174,65 @@ fn diff_hunks_overlap_emits_modified_body_touched() {
 }
 
 #[test]
+fn pattern_b_structural_rule_gated_by_diff_hunk_overlap() {
+    use std::collections::HashMap;
+
+    // Build base+head with the rules fixture pointing at rust-format-macro
+    // hits in greet.rs. Without diff hunks, the rule fires (backward
+    // compat). With diff hunks that DON'T overlap the finding line, the
+    // rule is suppressed — Pattern B from the M4 grading writeup.
+    let tmp = TempDir::new().unwrap();
+    let base_db = tmp.path().join("base.duckdb");
+    let head_db = tmp.path().join("head.duckdb");
+    build_at("base-sha", base_db.clone());
+    build_at("head-sha", head_db.clone());
+
+    // Baseline: no diff_hunks → rule fires (request lacks `--diff-hunks`).
+    let baseline = mallard::pr_review::run(mallard::pr_review::PrReviewRequest {
+        base_db: base_db.clone(),
+        head_db: head_db.clone(),
+        changed_files: vec!["greet.rs".to_string()],
+        max_comments: 20,
+        diff_hunks: None,
+    })
+    .unwrap();
+    let baseline_rule_hits = baseline
+        .comments
+        .iter()
+        .filter(|c| c.source_kind == "structural-rule")
+        .count();
+    assert!(
+        baseline_rule_hits >= 1,
+        "baseline (no diff_hunks) should emit ≥1 structural-rule comment, got {baseline_rule_hits}"
+    );
+
+    // With diff_hunks but a range that's NOT where the finding lives
+    // (lines 999-1000), suppress the rule emission.
+    let mut files = HashMap::new();
+    files.insert(
+        "greet.rs".to_string(),
+        vec![mallard::pr_review::DiffRange { start: 999, end: 1000 }],
+    );
+    let gated = mallard::pr_review::run(mallard::pr_review::PrReviewRequest {
+        base_db,
+        head_db,
+        changed_files: vec!["greet.rs".to_string()],
+        max_comments: 20,
+        diff_hunks: Some(mallard::pr_review::DiffHunks { files }),
+    })
+    .unwrap();
+    let gated_rule_hits = gated
+        .comments
+        .iter()
+        .filter(|c| c.source_kind == "structural-rule")
+        .count();
+    assert_eq!(
+        gated_rule_hits, 0,
+        "rule outside the diff hunks should be suppressed; got {gated_rule_hits}"
+    );
+}
+
+#[test]
 fn pr_review_markdown_render_includes_badge() {
     let tmp = TempDir::new().unwrap();
     let base_db = tmp.path().join("base.duckdb");
