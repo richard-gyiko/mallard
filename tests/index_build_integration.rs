@@ -183,33 +183,45 @@ fn python_request(out: PathBuf) -> BuildRequest {
 }
 
 #[test]
-fn bundled_rules_fire_across_languages() {
-    // Pilot Finding 5: structural-rule findings should fire out of the box.
-    // The bundled rule pack ships with the binary and loads via the new
-    // `rules_bundled` BuildRequest field. Verify it produces findings on
-    // sample-rust without user configuration.
+fn bundled_rules_fire_on_security_grade_python_patterns() {
+    // Pilot Finding 5 + Finding 6: structural-rule findings should fire
+    // out of the box. The bundled rule pack ships with the binary and
+    // loads via the new `rules_bundled` BuildRequest field. After the
+    // Finding-6 tightening, only security/correctness-grade rules stay
+    // bundled — verify against `risky_eval` / `risky_exec` in
+    // `sample-python/app.py` (python-eval-use + python-exec-use).
     let tmp = TempDir::new().unwrap();
     let out = tmp.path().join("bundled.duckdb");
     let req = BuildRequest {
-        root: fixture_root(),
-        sha: "bundled-test".to_string(),
         rules_path: None,
         rules_bundled: true,
-        out_path: out.clone(),
-        max_file_bytes: 1024 * 1024,
-        language_allow_list: vec!["rust".to_string()],
-        slowest_files_n: 10,
+        ..python_request(out.clone())
     };
     let summary = build(req).unwrap();
     assert!(
-        summary.counters.findings >= 1,
-        "bundled rule pack should produce ≥1 finding on sample-rust, got {}",
+        summary.counters.findings >= 2,
+        "bundled pack should hit eval + exec in sample-python, got {}",
         summary.counters.findings
     );
     assert!(
         summary.rule_set_hash.as_ref().is_some_and(|h| h.starts_with("bundled:")),
         "rule_set_hash should carry `bundled:` prefix, got {:?}",
         summary.rule_set_hash
+    );
+
+    // Style rule dropped in Finding-6 tightening must NOT fire in the
+    // bundled pack. Users who want stricter style policing add it via
+    // their own --rules path.
+    let conn = Connection::open(&out).unwrap();
+    let print_hits = count_where(
+        &conn,
+        tables::FINDINGS,
+        cols::findings::RULE_ID,
+        "python-print-call",
+    );
+    assert_eq!(
+        print_hits, 0,
+        "python-print-call should not be in the bundled pack (Finding 6)"
     );
 }
 
