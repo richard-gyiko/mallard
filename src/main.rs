@@ -5,6 +5,7 @@ use std::str::FromStr;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+use mallard::pr_review::{self, PrReviewRequest};
 use mallard::{
     BuildRequest, Direction, EdgeKind, FindingFilter, IndexReader, QueryRequest, SymbolId, build,
 };
@@ -22,6 +23,26 @@ enum Cmd {
     Index(IndexArgs),
     /// Query a built index.
     Query(QueryArgs),
+    /// Run deterministic-only PR review across two indexes (base / head).
+    /// Emits comments tagged by confidence tier — no LLM call. The
+    /// optional LLM-synthesis pass lands in Phase D.
+    PrReview(PrReviewArgs),
+}
+
+#[derive(Parser, Debug)]
+struct PrReviewArgs {
+    #[arg(long = "base-db")]
+    base_db: PathBuf,
+    #[arg(long = "head-db")]
+    head_db: PathBuf,
+    /// Comma-separated changed file paths (relative to repo root).
+    #[arg(long = "files", value_delimiter = ',')]
+    files: Vec<String>,
+    #[arg(long = "max-comments", default_value_t = 10)]
+    max_comments: usize,
+    /// Output format: `json` (default) or `markdown`.
+    #[arg(long, default_value = "json")]
+    format: String,
 }
 
 #[derive(Parser, Debug)]
@@ -148,6 +169,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Cmd::Index(args) => run_index(args),
         Cmd::Query(args) => run_query(args),
+        Cmd::PrReview(args) => run_pr_review(args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -190,6 +212,24 @@ fn parse_kinds(s: &str) -> anyhow::Result<Vec<EdgeKind>> {
 
 fn print<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn run_pr_review(args: PrReviewArgs) -> anyhow::Result<()> {
+    let result = pr_review::run(PrReviewRequest {
+        base_db: args.base_db,
+        head_db: args.head_db,
+        changed_files: args.files,
+        max_comments: args.max_comments,
+    })?;
+    match args.format.as_str() {
+        "markdown" => {
+            println!("{}", pr_review::render_markdown(&result));
+        }
+        _ => {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+    }
     Ok(())
 }
 

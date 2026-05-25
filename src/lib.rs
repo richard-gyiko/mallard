@@ -7,6 +7,7 @@ pub mod file_processor;
 pub mod index;
 pub mod parse_errors;
 pub mod parsed_source;
+pub mod pr_review;
 pub mod query;
 pub mod rules;
 pub mod schema;
