@@ -19,9 +19,10 @@ pub fn build(req: BuildRequest) -> Result<BuildSummary> {
     let started = std::time::Instant::now();
     let _root_span = info_span!("build", sha = %req.sha).entered();
 
-    let rules = match req.rules_path.as_ref() {
-        Some(p) => RuleSet::load(p)?,
-        None => RuleSet::empty(),
+    let rules = match (req.rules_path.as_ref(), req.rules_bundled) {
+        (Some(p), _) => RuleSet::load(p)?,
+        (None, true) => RuleSet::default_bundled()?,
+        (None, false) => RuleSet::empty(),
     };
 
     let mut processor = FileProcessor::new(rules)?;

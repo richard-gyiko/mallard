@@ -1,0 +1,79 @@
+# Bundled default rule pack — loaded automatically by `mallard pr-review`
+# and the `mallard-review` GitHub Action when `--rules` / `rules-path`
+# is unset. Curated for high signal-to-noise: each rule must flag a
+# pattern that's almost always worth a reviewer eyeball, not just a
+# style nit.
+#
+# Per-rule severity (informal): the `python-eval-use` / `js-eval-use`
+# pair are security-critical; the `*-todo` / `*-unimplemented` family
+# flags incomplete code merged to main; `unsafe` / `unwrap` family
+# flags risk that a reviewer probably should ack.
+
+rules:
+  # ============ Rust ============
+  - id: rust-unsafe-block
+    language: rust
+    pattern: "unsafe { $$$BODY }"
+    message: "unsafe block — verify invariants and add a SAFETY comment if missing."
+
+  - id: rust-todo-macro
+    language: rust
+    pattern: "todo!($$$ARGS)"
+    message: "todo!() — incomplete code merged. Resolve before release."
+
+  - id: rust-unimplemented-macro
+    language: rust
+    pattern: "unimplemented!($$$ARGS)"
+    message: "unimplemented!() — incomplete code merged. Resolve before release."
+
+  - id: rust-panic-macro
+    language: rust
+    pattern: "panic!($$$ARGS)"
+    message: "panic!() in production code — prefer Result + propagation, or document why panicking is the right call."
+
+  - id: rust-println-macro
+    language: rust
+    pattern: "println!($$$ARGS)"
+    message: "println!() — replace with `tracing` / `log` for non-CLI code."
+
+  # ============ Python ============
+  - id: python-eval-use
+    language: python
+    pattern: "eval($$$ARGS)"
+    message: "eval() — high-risk dynamic execution; replace with explicit parsing."
+
+  - id: python-exec-use
+    language: python
+    pattern: "exec($$$ARGS)"
+    message: "exec() — high-risk dynamic execution; avoid in production code."
+
+  - id: python-pickle-loads
+    language: python
+    pattern: "pickle.loads($$$ARGS)"
+    message: "pickle.loads() on untrusted input is an RCE primitive. Use JSON or msgpack instead."
+
+  - id: python-print-call
+    language: python
+    pattern: "print($$$ARGS)"
+    message: "print() call — replace with `logging` for non-CLI code."
+
+  # ============ TypeScript / JavaScript ============
+  - id: ts-any-cast
+    language: typescript
+    pattern: "$E as any"
+    message: "`as any` — type-system bypass. Narrow the type or document why `any` is the right escape hatch."
+
+  - id: ts-non-null-assertion
+    language: typescript
+    pattern: "$E!"
+    message: "Non-null assertion `!` — verify the assumption holds; prefer narrowing or explicit handling."
+
+  - id: js-eval-use
+    language: typescript
+    pattern: "eval($$$ARGS)"
+    message: "eval() — high-risk dynamic execution; replace with safer parsing."
+
+  - id: ts-console-log
+    language: typescript
+    pattern: "console.log($$$ARGS)"
+    message: "console.log() — replace with a structured logger for non-debug code."
