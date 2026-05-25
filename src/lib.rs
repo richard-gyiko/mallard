@@ -1,7 +1,9 @@
 pub mod core;
 pub mod extractor;
+pub mod extractor_python;
 pub mod file_processor;
 pub mod index;
+pub mod parse_errors;
 pub mod parsed_source;
 pub mod query;
 pub mod rules;

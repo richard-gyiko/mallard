@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
+tree-sitter-python = "0.23"
 ast-grep-core = "0.42"
 ast-grep-language = "0.42"
 duckdb = "=1.10502.0"

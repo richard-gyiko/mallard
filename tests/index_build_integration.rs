@@ -12,6 +12,13 @@ fn fixture_root() -> PathBuf {
         .join("sample-rust")
 }
 
+fn python_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("sample-python")
+}
+
 fn fixture_rules() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -117,6 +124,34 @@ fn happy_path_indexes_sample_repo() {
     assert!(
         metadata_value(&conn, metadata_keys::INDEX_FORMAT_VERSION).is_some(),
         "index_format_version stamped in metadata"
+    );
+}
+
+#[test]
+fn python_files_index_without_crashing() {
+    // A1 scaffolding test: `.py` files dispatched to PythonExtractor.
+    // No symbol extraction yet (A2 land); the contract is "doesn't crash
+    // and the file is recorded as Indexed."
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("python.duckdb");
+    let req = BuildRequest {
+        root: python_fixture_root(),
+        sha: "py-scaffold".to_string(),
+        rules_path: None,
+        out_path: out.clone(),
+        max_file_bytes: 1024 * 1024,
+        language_allow_list: vec!["python".to_string()],
+        slowest_files_n: 10,
+    };
+    let summary = build(req).unwrap();
+    assert_eq!(summary.sha, "py-scaffold");
+    assert!(out.exists(), "python index file written");
+
+    let conn = Connection::open(&out).unwrap();
+    let py_files = count_where(&conn, tables::FILES, cols::files::LANGUAGE, "python");
+    assert!(
+        py_files >= 2,
+        "expected at least 2 python files indexed, got {py_files}"
     );
 }
 

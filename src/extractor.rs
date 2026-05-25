@@ -207,7 +207,7 @@ impl SymbolExtractor for RustExtractor {
 
         let mut parse_errors: Vec<ParseError> = Vec::new();
         if root.has_error() {
-            collect_errors(root, source, file_id, &mut parse_errors);
+            crate::parse_errors::collect(root, source, file_id, &mut parse_errors);
         }
 
         let t_query = std::time::Instant::now();
@@ -748,26 +748,4 @@ fn node_anchor(node: Node) -> Anchor {
     }
 }
 
-fn collect_errors(node: Node, source: &[u8], file_id: FileId, out: &mut Vec<ParseError>) {
-    if node.is_error() || node.is_missing() {
-        out.push(ParseError {
-            file_id,
-            message: if node.is_missing() {
-                format!("missing node: {}", node.kind())
-            } else {
-                let snippet = node_text(node, source);
-                let short = snippet.chars().take(64).collect::<String>();
-                format!("syntax error near: {short}")
-            },
-            line: node.start_position().row as u32,
-            col: node.start_position().column as u32,
-        });
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.has_error() || child.is_error() || child.is_missing() {
-            collect_errors(child, source, file_id, out);
-        }
-    }
-}
 
