@@ -339,6 +339,10 @@ pub struct BuildRequest {
     pub root: PathBuf,
     pub sha: String,
     pub rules_path: Option<PathBuf>,
+    /// Load the bundled default rule pack (`assets/rules-default.yml`).
+    /// Ignored if `rules_path` is set. Used by `mallard-review` action
+    /// to surface structural findings without per-repo configuration.
+    pub rules_bundled: bool,
     pub out_path: PathBuf,
     pub max_file_bytes: u64,
     pub language_allow_list: Vec<String>,

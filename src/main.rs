@@ -50,8 +50,14 @@ struct IndexArgs {
     path: PathBuf,
     #[arg(long)]
     sha: String,
+    /// User-supplied rules YAML. Takes precedence over `--rules-bundled`.
     #[arg(long)]
     rules: Option<PathBuf>,
+    /// Load the curated default rule pack baked into the binary. Set by
+    /// the `mallard-review` GitHub Action when no per-repo rules path is
+    /// provided. Ignored when `--rules` is set.
+    #[arg(long = "rules-bundled", default_value_t = false)]
+    rules_bundled: bool,
     #[arg(long)]
     out: Option<PathBuf>,
     #[arg(long, default_value_t = 1024 * 1024)]
@@ -190,6 +196,7 @@ fn run_index(args: IndexArgs) -> anyhow::Result<()> {
         root: args.path,
         sha: args.sha,
         rules_path: args.rules,
+        rules_bundled: args.rules_bundled,
         out_path: out,
         max_file_bytes: args.max_file_bytes,
         language_allow_list: args.languages,

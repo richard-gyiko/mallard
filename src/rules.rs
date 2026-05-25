@@ -36,6 +36,11 @@ pub struct RuleSet {
     pub source_hash: Option<String>,
 }
 
+/// Bundled default rule pack — curated set shipped with mallard so the
+/// GitHub Action surfaces structural-rule findings out of the box. See
+/// `assets/rules-default.yml`.
+const BUNDLED_RULES_YAML: &str = include_str!("../assets/rules-default.yml");
+
 impl RuleSet {
     pub fn empty() -> Self {
         RuleSet {
@@ -44,9 +49,20 @@ impl RuleSet {
         }
     }
 
+    /// Default rule pack baked into the binary. Used when a build is
+    /// invoked without an explicit rules path. Source hash includes a
+    /// `bundled:` prefix so the metadata reflects the source.
+    pub fn default_bundled() -> Result<Self> {
+        Self::from_bytes(BUNDLED_RULES_YAML.as_bytes(), true)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        let file: RuleFile = serde_yaml::from_slice(&bytes)?;
+        Self::from_bytes(&bytes, false)
+    }
+
+    fn from_bytes(bytes: &[u8], bundled: bool) -> Result<Self> {
+        let file: RuleFile = serde_yaml::from_slice(bytes)?;
         let mut by_language: HashMap<SupportLang, Vec<CompiledRule>> = HashMap::new();
         for rule in file.rules {
             let lang = SupportLang::from_str(&rule.language).map_err(|_| {
@@ -64,9 +80,15 @@ impl RuleSet {
                 pattern,
             });
         }
+        let raw_hash = short_hash(blake3::hash(bytes));
+        let source_hash = if bundled {
+            Some(format!("bundled:{raw_hash}"))
+        } else {
+            Some(raw_hash)
+        };
         Ok(RuleSet {
             by_language,
-            source_hash: Some(short_hash(blake3::hash(&bytes))),
+            source_hash,
         })
     }
 

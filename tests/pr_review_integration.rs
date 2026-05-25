@@ -25,6 +25,7 @@ fn build_at(sha: &str, out: PathBuf) {
                 .join("fixtures")
                 .join("rules.yml"),
         ),
+        rules_bundled: false,
         out_path: out,
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["rust".to_string()],

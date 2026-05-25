@@ -31,6 +31,7 @@ fn typescript_request(out: PathBuf) -> BuildRequest {
         root: typescript_fixture_root(),
         sha: "ts-fixture".to_string(),
         rules_path: None,
+        rules_bundled: false,
         out_path: out,
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["typescript".to_string(), "tsx".to_string()],
@@ -50,6 +51,7 @@ fn javascript_request(out: PathBuf) -> BuildRequest {
         root: javascript_fixture_root(),
         sha: "js-fixture".to_string(),
         rules_path: None,
+        rules_bundled: false,
         out_path: out,
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["typescript".to_string(), "tsx".to_string()],
@@ -69,6 +71,7 @@ fn make_request(root: PathBuf, sha: &str, out: PathBuf) -> BuildRequest {
         root,
         sha: sha.to_string(),
         rules_path: None,
+        rules_bundled: false,
         out_path: out,
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["rust".to_string()],
@@ -84,6 +87,7 @@ fn make_request_with_rules(
 ) -> BuildRequest {
     BuildRequest {
         rules_path: Some(rules),
+        rules_bundled: false,
         ..make_request(root, sha, out)
     }
 }
@@ -170,11 +174,43 @@ fn python_request(out: PathBuf) -> BuildRequest {
         root: python_fixture_root(),
         sha: "py-fixture".to_string(),
         rules_path: None,
+        rules_bundled: false,
         out_path: out,
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["python".to_string()],
         slowest_files_n: 10,
     }
+}
+
+#[test]
+fn bundled_rules_fire_across_languages() {
+    // Pilot Finding 5: structural-rule findings should fire out of the box.
+    // The bundled rule pack ships with the binary and loads via the new
+    // `rules_bundled` BuildRequest field. Verify it produces findings on
+    // sample-rust without user configuration.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("bundled.duckdb");
+    let req = BuildRequest {
+        root: fixture_root(),
+        sha: "bundled-test".to_string(),
+        rules_path: None,
+        rules_bundled: true,
+        out_path: out.clone(),
+        max_file_bytes: 1024 * 1024,
+        language_allow_list: vec!["rust".to_string()],
+        slowest_files_n: 10,
+    };
+    let summary = build(req).unwrap();
+    assert!(
+        summary.counters.findings >= 1,
+        "bundled rule pack should produce ≥1 finding on sample-rust, got {}",
+        summary.counters.findings
+    );
+    assert!(
+        summary.rule_set_hash.as_ref().is_some_and(|h| h.starts_with("bundled:")),
+        "rule_set_hash should carry `bundled:` prefix, got {:?}",
+        summary.rule_set_hash
+    );
 }
 
 #[test]
@@ -239,6 +275,7 @@ fn python_rules_produce_findings() {
     let out = tmp.path().join("python-rules.duckdb");
     let req = BuildRequest {
         rules_path: Some(fixture_rules()),
+        rules_bundled: false,
         ..python_request(out.clone())
     };
     let summary = build(req).unwrap();

@@ -93,8 +93,14 @@ runs:
         LANG_ARGS=""
         IFS=',' read -ra LANGS <<< "$LANGUAGES"
         for L in "${LANGS[@]}"; do LANG_ARGS+=" --lang $L"; done
-        RULES_ARG=""
-        if [ -n "$RULES" ]; then RULES_ARG="--rules $RULES"; fi
+        # Rules: user-supplied path wins; otherwise load the bundled default
+        # rule pack so structural-rule findings surface without per-repo
+        # configuration (pilot Finding 5).
+        if [ -n "$RULES" ]; then
+          RULES_ARG="--rules $RULES"
+        else
+          RULES_ARG="--rules-bundled"
+        fi
         echo "lang-args=$LANG_ARGS" >> "$GITHUB_OUTPUT"
         echo "rules-arg=$RULES_ARG" >> "$GITHUB_OUTPUT"
 
