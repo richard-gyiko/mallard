@@ -327,6 +327,37 @@ fn is_fn_family(kind: Option<SymbolKind>) -> bool {
     matches!(kind, Some(SymbolKind::Function | SymbolKind::Method))
 }
 
+/// Pattern C helper: classify a symbol as "test-shaped" via either its
+/// file path OR its qualified-name prefix. Rust's idiomatic `mod tests
+/// { #[test] fn binary3() ... }` puts tests inside non-test-named
+/// files (`crates/searcher/src/searcher/glue.rs`), so the path alone
+/// misses them — the qualified name starts with `tests::`.
+pub(crate) fn is_test_symbol(path: &str, qualified_name: Option<&str>) -> bool {
+    if is_test_path(path) {
+        return true;
+    }
+    if let Some(qname) = qualified_name {
+        // Rust convention: `mod tests { fn foo() {} }` → `tests::foo`.
+        // Python: `class TestFoo` or `def test_foo` at module level
+        // → `TestFoo.method` or just `test_foo`.
+        if qname.starts_with("tests::")
+            || qname.starts_with("tests.")
+            || qname.starts_with("test::")
+            || qname.starts_with("test.")
+        {
+            return true;
+        }
+        // Fn names like `test_*` (Python convention) or symbols inside
+        // a Test*-prefixed class.
+        let last = qname.rsplit_once("::").map(|(_, t)| t).unwrap_or(qname);
+        let last = last.rsplit_once('.').map(|(_, t)| t).unwrap_or(last);
+        if last.starts_with("test_") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Pattern C: classify a path as test-shaped via filename / directory
 /// conventions across Rust, Python, JS/TS. Conservative — matches the
 /// common patterns; misses exotic naming but the cost is a stray
@@ -567,7 +598,10 @@ fn review_file(
                     .iter()
                     .map(|r| r.end.saturating_sub(r.start) + 1)
                     .sum();
-                if ignore_test_trivia && is_test_path(&sym.path) && total_lines <= 2 {
+                if ignore_test_trivia
+                    && is_test_symbol(&sym.path, Some(sym.qualified_name.as_str()))
+                    && total_lines <= 2
+                {
                     continue;
                 }
                 summary.symbols_modified_body += 1;
