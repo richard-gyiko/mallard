@@ -38,6 +38,10 @@ const RUST_QUERY: &str = r#"
 
 (call_expression function: (scoped_identifier name: (identifier) @ref.call.scoped)) @ref.call
 
+(macro_invocation macro: (identifier) @ref.macro.name) @ref.macro
+
+(macro_invocation macro: (scoped_identifier name: (identifier) @ref.macro.name)) @ref.macro
+
 (use_declaration) @import.decl
 "#;
 
@@ -64,7 +68,7 @@ impl RustExtractor {
         relative_path: &str,
     ) -> (Vec<Symbol>, Vec<Edge>) {
         let mut symbols: Vec<Symbol> = Vec::new();
-        let mut references: Vec<(Node, String, EdgeKind, bool)> = Vec::new();
+        let mut references: Vec<CallRef> = Vec::new();
         let mut imports: Vec<(Node, String)> = Vec::new();
 
         let mut matches = self.cursor.matches(&self.query, root, source);
@@ -78,10 +82,23 @@ impl RustExtractor {
                 }
                 9..=11 => {
                     if let Some((node, name, trust_intra_file)) = ref_call_match(m, source) {
-                        references.push((node, name, EdgeKind::Calls, trust_intra_file));
+                        references.push(CallRef {
+                            node,
+                            name,
+                            kind: EdgeKind::Calls,
+                            trust_intra_file,
+                            inhibit_resolver: false,
+                        });
                     }
                 }
-                12 => {
+                12 | 13 => {
+                    if let Some((macro_name, macro_invocation)) = macro_invocation_match(m, source)
+                        && MACRO_BODY_EXPRESSION_ALLOWLIST.contains(&macro_name.as_str())
+                    {
+                        collect_macro_body_calls(macro_invocation, source, &mut references);
+                    }
+                }
+                14 => {
                     if let Some(node) = m.captures.first().map(|c| c.node) {
                         let text = node_text(node, source);
                         imports.push((node, text));
@@ -119,11 +136,11 @@ impl RustExtractor {
         // call name is a stdlib variant constructor, matches a same-file
         // type definition, or is PascalCase with no same-file function /
         // method / macro of the same name.
-        for (node, name, kind, trust_intra_file) in references {
-            if kind == EdgeKind::Calls && is_constructor_call(&name, &symbols_by_short) {
+        for r in references {
+            if r.kind == EdgeKind::Calls && is_constructor_call(&r.name, &symbols_by_short) {
                 continue;
             }
-            let enclosing_sym = find_enclosing_definition(node, &symbols);
+            let enclosing_sym = find_enclosing_definition(r.node, &symbols);
             let enclosing = enclosing_sym
                 .map(|s| s.id.clone())
                 .unwrap_or_else(|| file_pseudo_src.clone());
@@ -131,28 +148,34 @@ impl RustExtractor {
             // trust the intra-file short-name map; otherwise emit Unresolved
             // and let the post-build resolver tier (Inferred / Ambiguous /
             // Unresolved). See ADR-0010 and `ref_call_match`.
-            let dst = if trust_intra_file {
+            let dst = if r.trust_intra_file {
                 let candidates = symbols_by_short
-                    .get(name.as_str())
+                    .get(r.name.as_str())
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                pick_extracted_target(candidates, node, enclosing_sym).map(|s| s.id.clone())
+                pick_extracted_target(candidates, r.node, enclosing_sym).map(|s| s.id.clone())
             } else {
                 None
             };
+            // `inhibit_resolver=true` (macro-body method-position calls whose
+            // receiver type can't be recovered from the token_tree) emit at
+            // confidence Ambiguous so the resolver leaves them alone — it
+            // promotes Unresolved only. Resolver skip in `store.rs::resolve_edges`.
             let (dst_unresolved, confidence) = if dst.is_some() {
                 (None, EdgeConfidence::Extracted)
+            } else if r.inhibit_resolver {
+                (Some(r.name.clone()), EdgeConfidence::Ambiguous)
             } else {
-                (Some(name.clone()), EdgeConfidence::Unresolved)
+                (Some(r.name.clone()), EdgeConfidence::Unresolved)
             };
             edges.push(Edge {
                 src: enclosing,
                 dst,
                 dst_unresolved,
-                kind,
+                kind: r.kind,
                 confidence,
                 file_id,
-                order_key: node.start_byte() as u64,
+                order_key: r.node.start_byte() as u64,
             });
         }
 
@@ -272,6 +295,157 @@ fn pick_name_and_def<'tree>(
     Some((smallest?, largest?))
 }
 
+/// Extract `(macro_name, macro_invocation_node)` from a pattern-12/13 match.
+/// The macro name is the text of the `@ref.macro.name` identifier capture;
+/// the macro_invocation node is the largest `@ref.macro` capture.
+fn macro_invocation_match<'tree>(
+    m: &tree_sitter::QueryMatch<'_, 'tree>,
+    source: &[u8],
+) -> Option<(String, Node<'tree>)> {
+    let name_capture = m
+        .captures
+        .iter()
+        .find(|c| c.node.kind() == "identifier")?;
+    let invocation = m
+        .captures
+        .iter()
+        .map(|c| c.node)
+        .find(|n| n.kind() == "macro_invocation")?;
+    Some((node_text(name_capture.node, source), invocation))
+}
+
+/// References emitted to the references vec carry per-edge hints that drive
+/// downstream emission: whether the parser is allowed to trust the per-file
+/// short-name map for Extracted promotion, and whether the post-build
+/// resolver should leave the edge alone (i.e. the parser already knows the
+/// edge is ambiguous because receiver context was lost — see C3).
+struct CallRef<'tree> {
+    node: Node<'tree>,
+    name: String,
+    kind: EdgeKind,
+    trust_intra_file: bool,
+    inhibit_resolver: bool,
+}
+
+/// Cap recursion depth in `walk_token_tree_for_calls` so pathological macro
+/// inputs (nested parens crafted by adversarial source) can't overflow the
+/// thread stack. Real Rust hits depths in the low double digits; 64 is
+/// comfortable headroom without being a usability foot-gun.
+const MACRO_BODY_MAX_DEPTH: u32 = 64;
+
+/// Walk a macro_invocation's `token_tree` and emit a call reference for each
+/// `name(args)` shape we can recognise inside the unparsed body. Receiver
+/// chains aren't tracked, so emitted refs always set `trust_intra_file =
+/// false`. The walker classifies each call site:
+///
+/// - identifier preceded by anonymous `.` → method position; we can't know
+///   the receiver type, so emit with `inhibit_resolver = true` (the parser
+///   tier marks Ambiguous; the resolver doesn't touch it).
+/// - identifier preceded by anonymous `::` and a prior identifier → emit
+///   the qualified name `Type::method`, letting the resolver use its
+///   `by_qualified` index.
+/// - identifier followed by anonymous `!` → nested macro invocation inside
+///   the outer macro body; skip (tree-sitter doesn't re-parse the inner
+///   macro, but the surrounding `identifier`-then-`token_tree` shape would
+///   otherwise be misclassified as a fn call).
+/// - everything else → free-function shape, emit Unresolved.
+fn collect_macro_body_calls<'tree>(
+    macro_invocation: Node<'tree>,
+    source: &[u8],
+    out: &mut Vec<CallRef<'tree>>,
+) {
+    let Some(token_tree) = macro_invocation
+        .named_children(&mut macro_invocation.walk())
+        .find(|c| c.kind() == "token_tree")
+    else {
+        return;
+    };
+    walk_token_tree_for_calls(token_tree, source, out, 0);
+}
+
+fn walk_token_tree_for_calls<'tree>(
+    token_tree: Node<'tree>,
+    source: &[u8],
+    out: &mut Vec<CallRef<'tree>>,
+    depth: u32,
+) {
+    if depth >= MACRO_BODY_MAX_DEPTH {
+        return;
+    }
+    // Single forward pass: remember the most recent `identifier` child and
+    // emit a call ref when the next named sibling is a `token_tree` (the
+    // `name(args)` shape). Recurse into nested token_trees.
+    let mut cursor = token_tree.walk();
+    let mut pending_ident: Option<Node<'tree>> = None;
+    for child in token_tree.named_children(&mut cursor) {
+        match child.kind() {
+            "identifier" => pending_ident = Some(child),
+            "token_tree" => {
+                if let Some(ident) = pending_ident.take() {
+                    emit_macro_body_call(ident, source, out);
+                }
+                walk_token_tree_for_calls(child, source, out, depth + 1);
+            }
+            _ => pending_ident = None,
+        }
+    }
+}
+
+/// Classify an `identifier`-then-`token_tree` pair inside a macro body and
+/// push an appropriate `CallRef`. Anonymous siblings of the identifier
+/// (`!`, `.`, `::`) disambiguate the call site shape — see the doc on
+/// `collect_macro_body_calls`.
+fn emit_macro_body_call<'tree>(
+    ident: Node<'tree>,
+    source: &[u8],
+    out: &mut Vec<CallRef<'tree>>,
+) {
+    // Nested macro invocation: identifier immediately followed (including
+    // anonymous siblings) by `!`, then `token_tree`. Skip — it's not a fn
+    // call, and the inner macro body isn't parsed.
+    if ident
+        .next_sibling()
+        .is_some_and(|n| n.kind() == "!")
+    {
+        return;
+    }
+
+    let prev = ident.prev_sibling();
+
+    // `Type::method(...)` shape — emit qualified name. Walk back across the
+    // anonymous `::` to the prior identifier (which is the Type segment).
+    if let Some(p) = prev
+        && p.kind() == "::"
+        && let Some(type_ident) = p.prev_sibling()
+        && type_ident.kind() == "identifier"
+    {
+        let type_name = node_text(type_ident, source);
+        let method_name = node_text(ident, source);
+        out.push(CallRef {
+            node: ident,
+            name: format!("{type_name}::{method_name}"),
+            kind: EdgeKind::Calls,
+            trust_intra_file: false,
+            inhibit_resolver: false,
+        });
+        return;
+    }
+
+    // `receiver.method(...)` shape — method position. Receiver type isn't
+    // tracked, so a globally-unique short name match would mis-Infer. Emit
+    // with `inhibit_resolver = true` so the parser tier marks Ambiguous and
+    // the post-build resolver leaves it alone.
+    let method_position = prev.is_some_and(|p| p.kind() == ".");
+
+    out.push(CallRef {
+        node: ident,
+        name: node_text(ident, source),
+        kind: EdgeKind::Calls,
+        trust_intra_file: false,
+        inhibit_resolver: method_position,
+    });
+}
+
 fn ref_call_match<'tree>(
     m: &tree_sitter::QueryMatch<'_, 'tree>,
     source: &[u8],
@@ -352,6 +526,33 @@ fn compute_signature(def_node: Node, source: &[u8], kind: SymbolKind) -> String 
 // Rust stdlib variant constructors callable with bare-identifier syntax.
 const STDLIB_VARIANT_CONSTRUCTORS: &[&str] = &["Ok", "Err", "Some", "None"];
 
+// Macros whose token_tree body is expression syntax — i.e. calls inside them
+// are real call sites. tree-sitter-rust does not parse macro bodies (they
+// stay as flat `token_tree` nodes), so without an explicit descent these
+// calls are invisible. Restricting to a known allowlist avoids descending
+// into DSL macros whose tokens are not Rust expressions.
+const MACRO_BODY_EXPRESSION_ALLOWLIST: &[&str] = &[
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "dbg",
+    "eprint",
+    "eprintln",
+    "format",
+    "matches",
+    "panic",
+    "print",
+    "println",
+    "todo",
+    "unimplemented",
+    "unreachable",
+    "write",
+    "writeln",
+];
+
 fn is_constructor_call(
     name: &str,
     symbols_by_short: &std::collections::HashMap<&str, Vec<&Symbol>>,
@@ -374,11 +575,14 @@ fn is_constructor_call(
     // captures `LookupSymbol`). Rust functions and methods are snake_case;
     // SCREAMING_SNAKE_CASE consts are uppercase-leading but contain `_`, so
     // exclude them from the heuristic to keep `CONST_HANDLER()`-style calls.
-    let pascal_case = name
+    // Check the rightmost segment so qualified names from macro-body
+    // extraction (`Builder::make`) aren't misclassified by their type prefix.
+    let last_segment = name.rsplit("::").next().unwrap_or(name);
+    let pascal_case = last_segment
         .chars()
         .next()
         .is_some_and(|c| c.is_ascii_uppercase())
-        && !name.contains('_');
+        && !last_segment.contains('_');
     if pascal_case {
         let any_callable = candidates.iter().any(|s| {
             matches!(
