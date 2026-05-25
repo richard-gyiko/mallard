@@ -127,31 +127,64 @@ fn happy_path_indexes_sample_repo() {
     );
 }
 
-#[test]
-fn python_files_index_without_crashing() {
-    // A1 scaffolding test: `.py` files dispatched to PythonExtractor.
-    // No symbol extraction yet (A2 land); the contract is "doesn't crash
-    // and the file is recorded as Indexed."
-    let tmp = TempDir::new().unwrap();
-    let out = tmp.path().join("python.duckdb");
-    let req = BuildRequest {
+fn python_request(out: PathBuf) -> BuildRequest {
+    BuildRequest {
         root: python_fixture_root(),
-        sha: "py-scaffold".to_string(),
+        sha: "py-fixture".to_string(),
         rules_path: None,
-        out_path: out.clone(),
+        out_path: out,
         max_file_bytes: 1024 * 1024,
         language_allow_list: vec!["python".to_string()],
         slowest_files_n: 10,
-    };
-    let summary = build(req).unwrap();
-    assert_eq!(summary.sha, "py-scaffold");
-    assert!(out.exists(), "python index file written");
+    }
+}
 
+#[test]
+fn python_index_records_files_and_dispatches_extractor() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("python.duckdb");
+    let summary = build(python_request(out.clone())).unwrap();
+    assert!(out.exists(), "python index file written");
     let conn = Connection::open(&out).unwrap();
     let py_files = count_where(&conn, tables::FILES, cols::files::LANGUAGE, "python");
     assert!(
         py_files >= 2,
         "expected at least 2 python files indexed, got {py_files}"
+    );
+    // Sanity: summary counters reflect at least the fixture's symbols.
+    assert!(
+        summary.counters.symbols >= 4,
+        "expected ≥4 symbols (double, Counter, __init__, bump), got {}",
+        summary.counters.symbols
+    );
+}
+
+#[test]
+fn python_extracts_functions_methods_and_classes() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("python-symbols.duckdb");
+    build(python_request(out.clone())).unwrap();
+    let conn = Connection::open(&out).unwrap();
+
+    // double + main from lib.py + app.py are top-level functions.
+    let functions = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "function");
+    assert!(
+        functions >= 2,
+        "expected ≥2 top-level functions (double, main), got {functions}"
+    );
+
+    // __init__ + bump on Counter become Method (in_class).
+    let methods = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "method");
+    assert!(
+        methods >= 2,
+        "expected ≥2 methods (__init__, bump), got {methods}"
+    );
+
+    // `class Counter` maps to SymbolKind::Struct (per ADR-0012 mapping).
+    let classes = count_where(&conn, tables::SYMBOLS, cols::symbols::KIND, "struct");
+    assert!(
+        classes >= 1,
+        "expected ≥1 class symbol (Counter), got {classes}"
     );
 }
 
