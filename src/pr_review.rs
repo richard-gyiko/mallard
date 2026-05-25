@@ -288,21 +288,27 @@ fn is_container_kind(kind: Option<SymbolKind>) -> bool {
     )
 }
 
-/// Pattern A2: drop the OUTERMOST Function / Method comment in a
-/// nesting chain when it encloses at least one other emitted
-/// Function / Method. The outer fn restates "this function was edited";
-/// the chain's middle + innermost comments carry the precise
-/// observations.
+/// Pattern A2: drop the OUTERMOST Function comment in a nesting chain
+/// when it encloses at least one other emitted Function / Method. The
+/// outer wrapper restates "this region was edited"; the chain's middle
+/// + innermost comments carry the precise observations.
 ///
-/// Cascade-avoidance: prior versions dropped every outer in a chain,
-/// losing meaningful mid-chain symbols (e.g. axios #10920's
-/// `dispatchHttpRequest`). The fixed rule drops a comment only when
-/// it is the outermost fn in its enclosure chain — no other emitted
-/// fn strictly encloses it.
+/// Two restraints prevent over-dropping:
+///
+/// 1. **Cascade-avoidance** — drop only when the comment is the
+///    outermost fn in its enclosure chain. Mid-chain Fn/Method
+///    comments survive (recovers axios #10920's `dispatchHttpRequest`).
+/// 2. **Methods are never dropped** — Methods sit on the class API
+///    boundary; they remain meaningful even when wrapping a private
+///    helper Function (recovers axios #10875's `set` over `setHeader`).
+///    Only module-level wrapper Functions get this treatment.
 fn suppress_outer_function_restate(pending: &mut Vec<PendingComment>) {
     let mut to_drop: Vec<usize> = Vec::new();
     for (i, outer) in pending.iter().enumerate() {
-        if !is_fn_family(outer.symbol_kind) {
+        // Methods are class API surface — never drop, even when they
+        // wrap nested helper Functions. Pattern A2 only fires on
+        // wrapper-shaped Functions.
+        if outer.symbol_kind != Some(SymbolKind::Function) {
             continue;
         }
         let Some((outer_start, outer_end)) = outer.anchor else {
@@ -851,14 +857,15 @@ mod precision_tests {
     }
 
     #[test]
-    fn pattern_a2_method_inside_method_drops_outer() {
-        // Method enclosing Method — also covered.
+    fn pattern_a2_does_not_drop_method_wrapping_function() {
+        // Class method `set` containing nested helper `setHeader` —
+        // axios #10875 shape. Method is class API surface; never drop.
         let mut p = vec![
-            pc("a.ts", (100, 500), Some(SymbolKind::Method), "modified-body"),
-            pc("a.ts", (200, 300), Some(SymbolKind::Method), "modified-body"),
+            pc("a.js", (100, 500), Some(SymbolKind::Method), "modified-body-logic"),
+            pc("a.js", (200, 300), Some(SymbolKind::Function), "modified-body-logic"),
         ];
         suppress_outer_function_restate(&mut p);
-        assert_eq!(p.len(), 1);
+        assert_eq!(p.len(), 2, "Method wrapper preserved; only Functions get dropped");
     }
 
     #[test]
