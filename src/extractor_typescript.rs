@@ -32,6 +32,12 @@ const TS_QUERY: &str = r#"
 (call_expression function: (member_expression property: (property_identifier) @ref.call.method)) @ref.call
 
 (import_statement) @import.decl
+
+(function_expression name: (identifier) @def.fn_expr.name) @def.fn_expr
+
+(variable_declarator
+  name: (identifier) @def.var_fn.name
+  value: [(arrow_function) (function_expression)]) @def.var_fn
 "#;
 
 /// TypeScript / TSX `SymbolExtractor`. Holds two pre-compiled Query
@@ -77,7 +83,7 @@ impl TypeScriptExtractor {
         let mut matches = self.cursor.matches(query, root, source);
         while let Some(m) = matches.next() {
             match m.pattern_index {
-                0..=4 => {
+                0..=4 | 8 | 9 => {
                     if let Some(sym) =
                         build_symbol_match(m, m.pattern_index, source, file_id, relative_path)
                     {
@@ -214,10 +220,13 @@ fn build_symbol_match<'tree>(
     relative_path: &str,
 ) -> Option<Symbol> {
     // 0 → function_declaration, 1 → class, 2 → interface, 3 → type_alias,
-    // 4 → method_definition. Interfaces map to SymbolKind::Trait (closest
-    // semantic match; both define a contract that other types implement).
+    // 4 → method_definition, 8 → named function_expression, 9 →
+    // variable_declarator bound to an arrow_function / function_expression.
+    // Patterns 8 + 9 (Finding 8) extend coverage to JS/TS module-level
+    // arrow / function expressions — the dominant shape in modern code.
+    // Interfaces map to SymbolKind::Trait; classes to Struct.
     let initial_kind = match pattern {
-        0 => SymbolKind::Function,
+        0 | 8 | 9 => SymbolKind::Function,
         1 => SymbolKind::Struct,
         2 => SymbolKind::Trait,
         3 => SymbolKind::TypeAlias,
@@ -226,18 +235,43 @@ fn build_symbol_match<'tree>(
     };
     let (name_node, def_node) = pick_name_and_def(m)?;
     let name = node_text(name_node, source);
-    let qualified_name = compute_qualified_name(def_node, &name, initial_kind, source);
-    let signature = compute_signature(def_node, source, initial_kind);
+    let kind = if matches!(initial_kind, SymbolKind::Function) && is_method_field(def_node) {
+        // Class field with arrow-function value (`foo = () => {}` inside a
+        // class_body) is semantically a method even though the grammar node
+        // is a variable_declarator-shaped public_field_definition.
+        SymbolKind::Method
+    } else {
+        initial_kind
+    };
+    let qualified_name = compute_qualified_name(def_node, &name, kind, source);
+    let signature = compute_signature(def_node, source, kind);
     let anchor = node_anchor(def_node);
-    let id = SymbolId::compute(relative_path, &qualified_name, initial_kind, &signature);
+    let id = SymbolId::compute(relative_path, &qualified_name, kind, &signature);
     Some(Symbol {
         id,
         file_id,
         qualified_name,
-        kind: initial_kind,
+        kind,
         signature,
         anchor,
     })
+}
+
+/// True when a Function-kind def_node lives inside a class_body — i.e.
+/// it's a class field with an arrow-function value, semantically a method.
+fn is_method_field(def_node: Node) -> bool {
+    let mut cur = def_node.parent();
+    while let Some(p) = cur {
+        if p.kind() == "class_body" {
+            return true;
+        }
+        if p.kind() == "function_declaration" || p.kind() == "method_definition" {
+            // Not a class field — nested fn inside another fn.
+            return false;
+        }
+        cur = p.parent();
+    }
+    false
 }
 
 fn compute_qualified_name(def_node: Node, name: &str, kind: SymbolKind, source: &[u8]) -> String {
@@ -266,13 +300,48 @@ fn compute_signature(def_node: Node, source: &[u8], kind: SymbolKind) -> String 
     if !matches!(kind, SymbolKind::Function | SymbolKind::Method) {
         return String::new();
     }
+    if let Some(params) = find_formal_parameters(def_node) {
+        return canonical_params(node_text(params, source));
+    }
+    String::new()
+}
+
+/// Locate the `formal_parameters` node owned by a function-bearing
+/// def_node. Covers all four shapes — `function_declaration` and
+/// `method_definition` expose the field directly; `function_expression`
+/// and `arrow_function` are nested inside `variable_declarator.value`;
+/// arrow functions can also appear as `public_field_definition.value`.
+fn find_formal_parameters(def_node: Node) -> Option<Node> {
+    // Direct child case (function_declaration, method_definition,
+    // function_expression, arrow_function — all of which expose
+    // `formal_parameters` as a direct child).
     let mut cursor = def_node.walk();
     for child in def_node.children(&mut cursor) {
         if child.kind() == "formal_parameters" {
-            return canonical_params(node_text(child, source));
+            return Some(child);
+        }
+        // arrow_function with a single un-parenthesized param uses the
+        // singular `parameter` field — surface it via a one-off shape that
+        // keeps the signature stable (`(x)`).
+        if child.kind() == "identifier"
+            && def_node.kind() == "arrow_function"
+            && def_node.child_by_field_name("parameter").is_some()
+        {
+            return Some(child);
         }
     }
-    String::new()
+    // Nested case — walk into the value field of a variable_declarator
+    // or public_field_definition.
+    let value = def_node
+        .child_by_field_name("value")
+        .or_else(|| def_node.child_by_field_name("body"))?;
+    let mut cursor = value.walk();
+    for child in value.children(&mut cursor) {
+        if child.kind() == "formal_parameters" {
+            return Some(child);
+        }
+    }
+    None
 }
 
 fn ref_call_match<'tree>(
