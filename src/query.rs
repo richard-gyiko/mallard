@@ -94,6 +94,100 @@ pub struct MetadataRecord {
     pub index_format_version: u32,
 }
 
+/// Lightweight cross-index symbol diff. Compares two `IndexReader`
+/// snapshots by `(qualified_name, path)` keys and partitions symbols into
+/// added (HEAD-only), removed (BASE-only), and modified (present in both
+/// but with a different anchor byte range — typically a body edit).
+/// Cheaper than `pr_review::run`: no rule findings, no diff-hunk overlap,
+/// no comment budget — just the structural delta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolDiff {
+    pub added: Vec<SymbolRecord>,
+    pub removed: Vec<SymbolRecord>,
+    pub modified: Vec<ModifiedSymbol>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModifiedSymbol {
+    pub qualified_name: String,
+    pub path: String,
+    pub base: SymbolRecord,
+    pub head: SymbolRecord,
+}
+
+/// Diff two opened indexes. Symbols match by `(qualified_name, path)`; a
+/// pair counts as `modified` when the anchor byte range or the line span
+/// differs. `path` change without rename is treated as remove+add — that
+/// matches what reviewers see in `git diff` (file relocation surfaces as
+/// add + delete unless `--find-renames` is set, which mallard doesn't try
+/// to second-guess).
+pub fn symbol_diff(base: &IndexReader, head: &IndexReader) -> Result<SymbolDiff> {
+    let base_syms = all_symbols(base)?;
+    let head_syms = all_symbols(head)?;
+
+    use std::collections::HashMap;
+    // Key includes signature so overloaded methods (`Outer::tag(&self)` vs
+    // `Outer::tag(&self, n: u32)`) don't false-match. Multiple symbols can
+    // still collapse onto one key when signatures are absent (e.g.
+    // attributes / consts) — for those we group into a Vec and pop
+    // one-to-one. Stable order from `all_symbols` keeps matching
+    // deterministic across runs.
+    type Key = (String, String, String);
+    let mut base_map: HashMap<Key, Vec<SymbolRecord>> = HashMap::with_capacity(base_syms.len());
+    for s in base_syms {
+        let key = (s.qualified_name.clone(), s.path.clone(), s.signature.clone());
+        base_map.entry(key).or_default().push(s);
+    }
+
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+
+    for h in head_syms {
+        let key = (h.qualified_name.clone(), h.path.clone(), h.signature.clone());
+        match base_map.get_mut(&key) {
+            None => added.push(h),
+            Some(bucket) if bucket.is_empty() => added.push(h),
+            Some(bucket) => {
+                let b = bucket.remove(0);
+                if b.anchor != h.anchor {
+                    modified.push(ModifiedSymbol {
+                        qualified_name: h.qualified_name.clone(),
+                        path: h.path.clone(),
+                        base: b,
+                        head: h,
+                    });
+                }
+            }
+        }
+    }
+
+    let removed: Vec<SymbolRecord> = base_map.into_values().flatten().collect();
+
+    Ok(SymbolDiff {
+        added,
+        removed,
+        modified,
+    })
+}
+
+fn all_symbols(reader: &IndexReader) -> Result<Vec<SymbolRecord>> {
+    reader.all_symbols()
+}
+
+/// Composite blast-radius for a qualified-name lookup. Agent-friendly shape:
+/// the symbol itself, its inbound callers, outbound callees, and the subset of
+/// callers that look like test seams. `other_qname_matches` surfaces ambiguity
+/// when the qname matched more than one symbol (e.g. shared short names across
+/// modules) — agents disambiguate via `path` + `kind` on the matches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlastRadius {
+    pub symbol: SymbolRecord,
+    pub callers: Vec<SymbolRecord>,
+    pub callees: Vec<SymbolRecord>,
+    pub test_seams: Vec<SymbolRecord>,
+    pub other_qname_matches: Vec<SymbolRecord>,
+}
+
 /// Bulk per-file output: every symbol defined in the file, plus its
 /// outbound and inbound edges (peer-enriched). Symbols with zero edges
 /// still appear with empty `outbound` / `inbound` so callers can
@@ -158,6 +252,19 @@ pub enum QueryRequest {
     ImportersOfFile { path: String },
     FilesAtPrefix { prefix: String },
     Metadata,
+    /// Find symbols by qualified name. Exact `qualified_name = X` matches rank
+    /// first; suffix matches (`*.X`) follow. Agents query by short name when
+    /// they don't yet know the full module path.
+    FindByQname { qname: String },
+    /// Composite blast-radius lookup by qualified name. Picks the top
+    /// `FindByQname` match and returns its callers, callees, and test seams
+    /// in one shot — the agent-facing surface for "what breaks if I touch X?"
+    BlastRadius { qname: String },
+    /// Test seams targeting a symbol — inbound callers from files
+    /// classified as test files by path or qname convention. Standalone
+    /// version of the `BlastRadius.test_seams` slice; useful when the
+    /// agent only needs to know "which tests exercise this symbol?"
+    TestSeams { qname: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +280,9 @@ pub enum QueryResult {
     ImportersOfFile(Vec<SymbolRecord>),
     FilesAtPrefix(Vec<FileRecordOut>),
     Metadata(MetadataRecord),
+    FindByQname(Vec<SymbolRecord>),
+    BlastRadius(Option<BlastRadius>),
+    TestSeams(Vec<SymbolRecord>),
 }
 
 /// Verified handle to a built Index. `open` checks `index_format_version` once;
@@ -468,6 +578,15 @@ impl IndexReader {
                 Ok(QueryResult::FilesAtPrefix(self.files_at_prefix(prefix)?))
             }
             QueryRequest::Metadata => Ok(QueryResult::Metadata(self.metadata()?)),
+            QueryRequest::FindByQname { qname } => {
+                Ok(QueryResult::FindByQname(self.find_by_qname(qname)?))
+            }
+            QueryRequest::BlastRadius { qname } => {
+                Ok(QueryResult::BlastRadius(self.blast_radius(qname)?))
+            }
+            QueryRequest::TestSeams { qname } => {
+                Ok(QueryResult::TestSeams(self.test_seams(qname)?))
+            }
         }
     }
 
@@ -678,6 +797,126 @@ impl IndexReader {
                 caller: read_required_symbol(r, 3)?,
             })
         })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Find symbols by qualified name. Exact `qualified_name = qname` matches
+    /// rank first, then suffix matches across both separator conventions —
+    /// `*.qname` (Python / TS / JS) and `*::qname` (Rust). Within each tier,
+    /// results are ordered by path then anchor. Agents typically query a
+    /// short name (e.g. `foo`) and rely on suffix matching to find symbols
+    /// defined as `module.bar.foo` or `Bar::foo`.
+    pub fn find_by_qname(&self, qname: &str) -> Result<Vec<SymbolRecord>> {
+        let dot_suffix = format!("%.{qname}");
+        let colon_suffix = format!("%::{qname}");
+        let sql = format!(
+            "{SYMBOL_SELECT} WHERE s.qualified_name = ? \
+                OR s.qualified_name LIKE ? \
+                OR s.qualified_name LIKE ? \
+             ORDER BY (s.qualified_name = ?) DESC, f.path, s.anchor_start_byte"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![qname, dot_suffix, colon_suffix, qname],
+            map_symbol_row,
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Composite blast-radius: qname → top match → inbound + outbound
+    /// neighbors (all edge kinds) → split into callers/callees/test_seams.
+    /// Test classification uses `pr_review::is_test_symbol` (path conventions
+    /// + qname prefixes), so Rust `mod tests { ... }` is covered without a
+    /// `tests/` directory. Returns `None` only when the qname matches no
+    /// symbol; an isolated symbol with no neighbors yields a
+    /// `BlastRadius` with empty caller/callee lists.
+    pub fn blast_radius(&self, qname: &str) -> Result<Option<BlastRadius>> {
+        let matches = self.find_by_qname(qname)?;
+        let Some(symbol) = matches.first().cloned() else {
+            return Ok(None);
+        };
+        let other_qname_matches = matches.into_iter().skip(1).collect();
+
+        let edges = self.neighbors(&symbol.id, &[], Direction::Both)?;
+        let mut callers: Vec<SymbolRecord> = Vec::new();
+        let mut callees: Vec<SymbolRecord> = Vec::new();
+        let mut test_seams: Vec<SymbolRecord> = Vec::new();
+        let mut seen_callers = std::collections::HashSet::new();
+        let mut seen_callees = std::collections::HashSet::new();
+        let mut seen_seams = std::collections::HashSet::new();
+
+        for e in edges {
+            match e.direction {
+                Direction::In => {
+                    let caller = e.src;
+                    if seen_callers.insert(caller.id.0.clone()) {
+                        if crate::pr_review::is_test_symbol(
+                            &caller.path,
+                            Some(&caller.qualified_name),
+                        ) && seen_seams.insert(caller.id.0.clone())
+                        {
+                            test_seams.push(caller.clone());
+                        }
+                        callers.push(caller);
+                    }
+                }
+                Direction::Out => {
+                    if let Some(callee) = e.dst
+                        && seen_callees.insert(callee.id.0.clone()) {
+                        callees.push(callee);
+                    }
+                }
+                Direction::Both => {}
+            }
+        }
+
+        Ok(Some(BlastRadius {
+            symbol,
+            callers,
+            callees,
+            test_seams,
+            other_qname_matches,
+        }))
+    }
+
+    /// Standalone test-seam lookup. Resolves qname → symbol → inbound
+    /// neighbors, then filters callers by `pr_review::is_test_symbol`.
+    /// Returns empty vec if qname has no match (so it composes cleanly
+    /// with shell pipelines that don't want a null result).
+    pub fn test_seams(&self, qname: &str) -> Result<Vec<SymbolRecord>> {
+        let matches = self.find_by_qname(qname)?;
+        let Some(symbol) = matches.first() else {
+            return Ok(Vec::new());
+        };
+        let edges = self.neighbors(&symbol.id, &[], Direction::In)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for e in edges {
+            let caller = e.src;
+            if crate::pr_review::is_test_symbol(&caller.path, Some(&caller.qualified_name))
+                && seen.insert(caller.id.0.clone())
+            {
+                out.push(caller);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Stream every indexed symbol with file path enrichment. Ordered by
+    /// `(path, anchor_start_byte)` for deterministic output. Backs
+    /// `symbol_diff` and ad-hoc full-index dumps.
+    pub fn all_symbols(&self) -> Result<Vec<SymbolRecord>> {
+        let sql = format!("{SYMBOL_SELECT} ORDER BY f.path, s.anchor_start_byte");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], map_symbol_row)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);

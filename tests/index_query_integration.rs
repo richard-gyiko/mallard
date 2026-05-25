@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use duckdb::Connection;
 use mallard::{
     BuildRequest, Direction, EdgeConfidence, EdgeKind, FindingFilter, IndexReader, MallardError,
-    QueryRequest, QueryResult, SymbolId, build,
+    QueryRequest, QueryResult, SymbolId, build, symbol_diff,
 };
 use tempfile::TempDir;
 
@@ -114,6 +114,153 @@ fn lookup_symbol_present_and_missing() {
         .lookup_symbol(&SymbolId("0".repeat(32)))
         .unwrap();
     assert!(missing.is_none());
+}
+
+#[test]
+fn find_by_qname_exact_match_returns_symbol() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let hits = open_reader(&out).find_by_qname("double").unwrap();
+    assert!(!hits.is_empty(), "expected at least one match for `double`");
+    let first = &hits[0];
+    assert_eq!(first.qualified_name, "double");
+    assert_eq!(first.path, "lib.rs");
+}
+
+#[test]
+fn find_by_qname_missing_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let hits = open_reader(&out).find_by_qname("nonexistent_symbol_xyz").unwrap();
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn blast_radius_returns_callers_and_callees() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    // `double` in the sample-rust fixture is called by `bump`; should
+    // appear in callers and have its own symbol record returned.
+    let br = open_reader(&out)
+        .blast_radius("double")
+        .unwrap()
+        .expect("blast-radius matches `double`");
+    assert_eq!(br.symbol.qualified_name, "double");
+    assert!(
+        br.callers.iter().any(|s| s.qualified_name.ends_with("bump")),
+        "expected a `bump` symbol as caller of `double`, got {:?}",
+        br.callers.iter().map(|s| &s.qualified_name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn symbol_diff_same_index_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    let base_db = tmp.path().join("base.duckdb");
+    let head_db = tmp.path().join("head.duckdb");
+    build_fixture(&base_db, false);
+    build_fixture(&head_db, false);
+
+    let base = open_reader(&base_db);
+    let head = open_reader(&head_db);
+    let diff = symbol_diff(&base, &head).unwrap();
+    assert!(diff.added.is_empty(), "no adds expected, got {:?}", diff.added);
+    assert!(diff.removed.is_empty(), "no removes expected, got {:?}", diff.removed);
+    assert!(
+        diff.modified.is_empty(),
+        "no modifications expected, got {:?}",
+        diff.modified
+    );
+}
+
+#[test]
+fn symbol_diff_python_vs_rust_returns_all_changed() {
+    // Cross-fixture sanity: every base symbol disappears, every head
+    // symbol appears.
+    let tmp = TempDir::new().unwrap();
+    let base_db = tmp.path().join("base.duckdb");
+    let head_db = tmp.path().join("head.duckdb");
+    build_fixture(&base_db, false);
+    build_python_fixture(&head_db);
+
+    let base = open_reader(&base_db);
+    let head = open_reader(&head_db);
+    let diff = symbol_diff(&base, &head).unwrap();
+    assert!(!diff.added.is_empty());
+    assert!(!diff.removed.is_empty());
+    // No qname+path overlap → no modified entries.
+    assert!(diff.modified.is_empty());
+}
+
+#[test]
+fn test_seams_returns_empty_when_no_test_callers() {
+    // sample-rust fixture has no `tests/` directory and no `*_test.rs`
+    // siblings, so any symbol's test-seam list must be empty.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let seams = open_reader(&out).test_seams("double").unwrap();
+    assert!(seams.is_empty(), "no test files in fixture; got {seams:?}");
+}
+
+#[test]
+fn test_seams_missing_qname_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let seams = open_reader(&out).test_seams("nonexistent_xyz").unwrap();
+    assert!(seams.is_empty());
+}
+
+#[test]
+fn blast_radius_missing_qname_returns_none() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    let br = open_reader(&out).blast_radius("nonexistent_xyz").unwrap();
+    assert!(br.is_none());
+}
+
+#[test]
+fn find_by_qname_matches_rust_colon_suffix() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_fixture(&out, false);
+
+    // sample-rust fixture has `Counter::bump`. Bare `bump` query should
+    // suffix-match via the `::` separator, not just `.` (Python/TS).
+    let hits = open_reader(&out).find_by_qname("bump").unwrap();
+    assert!(
+        hits.iter().any(|s| s.qualified_name == "Counter::bump"),
+        "expected `Counter::bump` to suffix-match `bump`, got {:?}",
+        hits.iter().map(|s| &s.qualified_name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn find_by_qname_ranks_exact_before_suffix() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("index.duckdb");
+    build_python_fixture(&out);
+
+    // Python fixture has both qualified and short names — exact match
+    // (if any) ranks first by ORDER BY clause.
+    let hits = open_reader(&out).find_by_qname("greet").unwrap();
+    if hits.iter().any(|s| s.qualified_name == "greet") {
+        assert_eq!(
+            hits[0].qualified_name, "greet",
+            "exact qname match ranks first"
+        );
+    }
 }
 
 #[test]

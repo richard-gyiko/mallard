@@ -2,6 +2,13 @@
 name = "mallard"
 version = "0.1.0"
 edition = "2024"
+description = "Deterministic, citation-grounded structural code-index for verifying AI-generated code changes. Per-SHA DuckDB graph. No LLM."
+license = "MIT"
+repository = "https://github.com/richard-gyiko/mallard"
+homepage = "https://github.com/richard-gyiko/mallard"
+readme = "README.md"
+keywords = ["code-intelligence", "static-analysis", "agent", "code-review", "ai"]
+categories = ["development-tools", "command-line-utilities"]
 
 [lib]
 name = "mallard"

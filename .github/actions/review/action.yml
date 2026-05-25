@@ -5,8 +5,8 @@ branding:
   color: "purple"
 
 inputs:
-  # NOTE: `anthropic-api-key` will be added in Phase D when LLM-soft enrichment lands.
-  # Omitted from v1 to avoid confusing users into thinking a key is required today.
+  # Mallard is deterministic-only by design (see ADR-0013). No API key input,
+  # ever — the action runs offline on the GitHub-hosted runner.
   languages:
     description: "Comma-separated language allowlist for the index."
     required: false

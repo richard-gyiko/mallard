@@ -2,9 +2,8 @@
 //! index plus a list of changed files, computes the structural-evidence
 //! delta, and emits comments tagged by confidence tier. Designed to be
 //! consumed by a GitHub Action wrapper that posts inline comments via
-//! `gh pr review`. The LLM-synthesis layer ships in Phase D — this stage
-//! is the trust-calibrated baseline that fits the privacy wedge: no code
-//! leaves the runner.
+//! `gh pr review`. No LLM, ever — mallard's permanent product shape per
+//! ADR-0013. Trust-calibrated baseline: no code leaves the runner.
 //!
 //! Pipeline shape (per `docs/specs/pr-review/pull-request-review.md`):
 //!   - Stage 3: signature diff (added / removed symbols)
@@ -364,7 +363,7 @@ fn is_fn_family(kind: Option<SymbolKind>) -> bool {
 /// { #[test] fn binary3() ... }` puts tests inside non-test-named
 /// files (`crates/searcher/src/searcher/glue.rs`), so the path alone
 /// misses them — the qualified name starts with `tests::`.
-pub(crate) fn is_test_symbol(path: &str, qualified_name: Option<&str>) -> bool {
+pub fn is_test_symbol(path: &str, qualified_name: Option<&str>) -> bool {
     if is_test_path(path) {
         return true;
     }
@@ -394,7 +393,7 @@ pub(crate) fn is_test_symbol(path: &str, qualified_name: Option<&str>) -> bool {
 /// conventions across Rust, Python, JS/TS. Conservative — matches the
 /// common patterns; misses exotic naming but the cost is a stray
 /// test-trivia comment, not a wrong claim.
-pub(crate) fn is_test_path(path: &str) -> bool {
+pub fn is_test_path(path: &str) -> bool {
     let lower = path.to_lowercase();
     // Directory conventions: tests/ at root or nested.
     if lower.starts_with("tests/")

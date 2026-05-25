@@ -8,6 +8,7 @@ use tracing_subscriber::EnvFilter;
 use mallard::pr_review::{self, PrReviewRequest};
 use mallard::{
     BuildRequest, Direction, EdgeKind, FindingFilter, IndexReader, QueryRequest, SymbolId, build,
+    symbol_diff,
 };
 
 #[derive(Parser, Debug)]
@@ -24,13 +25,18 @@ enum Cmd {
     /// Query a built index.
     Query(QueryArgs),
     /// Run deterministic-only PR review across two indexes (base / head).
-    /// Emits comments tagged by confidence tier — no LLM call. The
-    /// optional LLM-synthesis pass lands in Phase D.
+    /// Emits comments tagged by confidence tier — no LLM call, ever.
+    /// Mallard's permanent product shape is deterministic-only per ADR-0013.
     PrReview(PrReviewArgs),
     /// Emit per-file `DiffHunks` JSON for consumption by `pr-review`.
     /// Wraps `git diff --unified=0 <base> <head>` and parses the unified
     /// diff hunks (`@@ -A,B +C,D @@` headers) into the JSON shape.
     DiffHunks(DiffHunksArgs),
+    /// Lightweight cross-index symbol diff. Returns added / removed /
+    /// modified symbols by `(qualified_name, path)` matching. Cheaper
+    /// than `pr-review` — no rule findings, no comment budget. Use when
+    /// an agent just wants "what symbols changed between these two SHAs?"
+    SymbolDiff(SymbolDiffArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -75,6 +81,14 @@ struct DiffHunksArgs {
     /// Repo path. Defaults to the current directory.
     #[arg(long, default_value = ".")]
     repo: PathBuf,
+}
+
+#[derive(Parser, Debug)]
+struct SymbolDiffArgs {
+    #[arg(long = "base-db")]
+    base_db: PathBuf,
+    #[arg(long = "head-db")]
+    head_db: PathBuf,
 }
 
 #[derive(Parser, Debug)]
@@ -193,6 +207,33 @@ enum QueryCmd {
         #[arg(long)]
         index: PathBuf,
     },
+    /// Find symbols by qualified name. Exact match ranks first, then
+    /// suffix matches (`*.qname`). Use when an agent has a short name
+    /// like `foo` and needs the full symbol record.
+    Find {
+        #[arg(long)]
+        index: PathBuf,
+        #[arg(long)]
+        qname: String,
+    },
+    /// Composite blast-radius lookup by qualified name. Returns the
+    /// symbol, its callers, callees, test seams, and any sibling qname
+    /// matches in one shot. Use BEFORE renaming, removing, or modifying
+    /// a public symbol to scope refactor impact.
+    BlastRadius {
+        #[arg(long)]
+        index: PathBuf,
+        #[arg(long)]
+        qname: String,
+    },
+    /// Test seams targeting a symbol — callers from files classified as
+    /// test files. Use to find which tests to run after modifying a symbol.
+    TestSeams {
+        #[arg(long)]
+        index: PathBuf,
+        #[arg(long)]
+        qname: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -209,6 +250,7 @@ fn main() -> ExitCode {
         Cmd::Query(args) => run_query(args),
         Cmd::PrReview(args) => run_pr_review(args),
         Cmd::DiffHunks(args) => run_diff_hunks(args),
+        Cmd::SymbolDiff(args) => run_symbol_diff(args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -255,6 +297,25 @@ fn print<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// JSON contract version for the agent-facing surface — `find`, `blast-radius`,
+/// `test-seams`, `symbol-diff`. Bumped via SemVer on any breaking shape change.
+/// Older query primitives keep their unversioned shape for back-compat with
+/// existing tooling (the `mallard-review` Action and ADR-0007 composition
+/// patterns); see `docs/cli-json-contract.md`.
+const CLI_SCHEMA_VERSION: &str = "1.0";
+
+fn print_versioned<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
+    let mut v = serde_json::to_value(value)?;
+    if let serde_json::Value::Object(ref mut m) = v {
+        m.insert(
+            "schema_version".to_string(),
+            serde_json::Value::String(CLI_SCHEMA_VERSION.to_string()),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
 fn run_pr_review(args: PrReviewArgs) -> anyhow::Result<()> {
     let diff_hunks = match args.diff_hunks {
         Some(path) => {
@@ -283,6 +344,13 @@ fn run_pr_review(args: PrReviewArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_symbol_diff(args: SymbolDiffArgs) -> anyhow::Result<()> {
+    let base = IndexReader::open(&args.base_db)?;
+    let head = IndexReader::open(&args.head_db)?;
+    let diff = symbol_diff(&base, &head)?;
+    print_versioned(&diff)
+}
+
 fn run_diff_hunks(args: DiffHunksArgs) -> anyhow::Result<()> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -308,7 +376,22 @@ fn run_diff_hunks(args: DiffHunksArgs) -> anyhow::Result<()> {
 fn run_query(args: QueryArgs) -> anyhow::Result<()> {
     let (index, request) = to_request(args.sub)?;
     let result = IndexReader::open(&index)?.run(&request)?;
-    print(&result)
+    if is_versioned_request(&request) {
+        print_versioned(&result)
+    } else {
+        print(&result)
+    }
+}
+
+/// Agent-facing primitives emit `schema_version`; legacy primitives stay
+/// shape-stable for ADR-0007 compositions and downstream `jq` pipelines.
+fn is_versioned_request(req: &QueryRequest) -> bool {
+    matches!(
+        req,
+        QueryRequest::FindByQname { .. }
+            | QueryRequest::BlastRadius { .. }
+            | QueryRequest::TestSeams { .. }
+    )
 }
 
 fn to_request(cmd: QueryCmd) -> anyhow::Result<(std::path::PathBuf, QueryRequest)> {
@@ -381,5 +464,8 @@ fn to_request(cmd: QueryCmd) -> anyhow::Result<(std::path::PathBuf, QueryRequest
         QueryCmd::ImportersOf { path, index } => (index, QueryRequest::ImportersOfFile { path }),
         QueryCmd::Files { index, prefix } => (index, QueryRequest::FilesAtPrefix { prefix }),
         QueryCmd::Metadata { index } => (index, QueryRequest::Metadata),
+        QueryCmd::Find { index, qname } => (index, QueryRequest::FindByQname { qname }),
+        QueryCmd::BlastRadius { index, qname } => (index, QueryRequest::BlastRadius { qname }),
+        QueryCmd::TestSeams { index, qname } => (index, QueryRequest::TestSeams { qname }),
     })
 }

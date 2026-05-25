@@ -22,7 +22,7 @@ pub use crate::core::{
 pub use crate::file_processor::FileProcessor;
 pub use crate::index::build;
 pub use crate::query::{
-    Direction, FileEdgeBundle, FileRecordOut, FindingFilter, FindingRecord, IndexReader,
-    MetadataRecord, NeighborEdge, QueryRequest, QueryResult, Subgraph, SymbolRecord,
-    UnresolvedCallerHit,
+    BlastRadius, Direction, FileEdgeBundle, FileRecordOut, FindingFilter, FindingRecord,
+    IndexReader, MetadataRecord, ModifiedSymbol, NeighborEdge, QueryRequest, QueryResult,
+    Subgraph, SymbolDiff, SymbolRecord, UnresolvedCallerHit, symbol_diff,
 };
