@@ -139,5 +139,5 @@ Negative / tradeoffs:
   surface that consumes the cross-language index.
 - [docs/research/wedge-dogfood-1.md](../research/wedge-dogfood-1.md) —
   Gap 2 / C2 / C4 / C7 fixes that became cross-language invariants.
-- [docs/plans/move-1-python-ts-action.md](../plans/move-1-python-ts-action.md)
-  — the rollout of three languages + GitHub Action this ADR captures.
+- Move 1 plan (internal) — the rollout of three languages + GitHub
+  Action this ADR captures. Superseded by [ADR-0013](0013-kill-phase-d-pivot-agent-verification.md).

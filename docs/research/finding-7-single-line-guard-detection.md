@@ -156,4 +156,4 @@ Total: ~2 days. Lands as a single PR with a clear before/after metric (pilot v2 
 
 ## Backlog status
 
-Add to [`next.md`](../../next.md) under Priority 2 (LLM-soft synthesis pickup) — Option B should land BEFORE re-running the pilot for Move 2 benchmark publication.
+Option B shipped (PR #36) before the pilot re-run. Phase D / LLM-soft synthesis path subsequently killed per [ADR-0013](../decisions/0013-kill-phase-d-pivot-agent-verification.md).

@@ -23,13 +23,15 @@ Core thesis: LLMs are strong enough; the bottleneck is repository context retrie
 ## Data flows
 
 1. Repo snapshot (commit SHA) → parser → symbols + edges → store.
-2. PR diff → changed-file overlay → retrieval (symbols touched, callers, blast radius) + structural findings → LLM reviewer → review output.
+2. PR diff → changed-file overlay → retrieval (symbols touched, callers, blast radius) + structural findings → review output.
+3. Agent query (skill-invoked) → CLI primitive (`find` / `blast-radius` / `test-seams` / `symbol-diff`) → JSON on stdout with `schema_version: "1.0"`.
 
 ## Integrations
 
 - **Git** — read-only repository access; commit SHA is the indexing unit.
 - **GitHub PR provider** — diff input via `git diff --name-only`; review output via `gh pr comment`. Composite Action at `.github/actions/review/action.yml`.
-- **LLM provider** — review synthesis (optional, Phase D). Provider-agnostic at the boundary. v1 ships deterministic-only — zero LLM calls per [decisions/0011-deterministic-only-pr-review-v1.md](decisions/0011-deterministic-only-pr-review-v1.md).
+- **Agent skill** — mallard ships as an [Anthropic Agent Skill](https://github.com/anthropics/skills) at `skills/mallard/SKILL.md`. Distributed via [skills.sh](https://www.skills.sh). Reaches Claude Code, Codex CLI, ChatGPT; other agents shell-exec the CLI directly.
+- **LLM provider** — none. Deterministic-only is the permanent product shape per [ADR-0011](decisions/0011-deterministic-only-pr-review-v1.md) and [ADR-0013](decisions/0013-kill-phase-d-pivot-agent-verification.md).
 
 ## Deployment
 

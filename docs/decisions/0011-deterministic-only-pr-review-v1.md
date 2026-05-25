@@ -18,7 +18,7 @@ question for v1 was whether to:
 
 Two pressures pull opposite directions:
 
-- The [2026 market analysis](../research/market-analysis-2026-05.md)
+- The 2026 market analysis (internal)
   finds the dominant small-team complaint about AI reviewers is
   **noise**, not lack of insight. CodeRabbit's "28% comments noise"
   (Lychee audit) and Greptile's "pure noise, gave up after 3 PRs" (HN
@@ -122,7 +122,7 @@ Negative / tradeoffs:
   Phase D.
 - [ADR-0010](0010-edge-confidence-tier.md) — the four-tier confidence
   model that becomes the badge prefix.
-- [docs/research/market-analysis-2026-05.md](../research/market-analysis-2026-05.md)
-  — the noise vs. recall framing that drives this decision.
-- [docs/plans/move-1-python-ts-action.md](../plans/move-1-python-ts-action.md)
-  — Phase C / Phase D split.
+- 2026 market analysis (internal) — the noise vs. recall framing that
+  drives this decision.
+- Move 1 plan (internal) — Phase C / Phase D split, since superseded
+  by [ADR-0013](0013-kill-phase-d-pivot-agent-verification.md).
