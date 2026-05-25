@@ -140,6 +140,32 @@ fn python_request(out: PathBuf) -> BuildRequest {
 }
 
 #[test]
+fn python_rules_produce_findings() {
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("python-rules.duckdb");
+    let req = BuildRequest {
+        rules_path: Some(fixture_rules()),
+        ..python_request(out.clone())
+    };
+    let summary = build(req).unwrap();
+    assert!(
+        summary.counters.findings >= 3,
+        "expected ≥3 python findings (eval, exec, print), got {}",
+        summary.counters.findings
+    );
+    let conn = Connection::open(&out).unwrap();
+    let eval_hits =
+        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "python-eval-use");
+    assert!(eval_hits >= 1, "python-eval-use hit at least once, got {eval_hits}");
+    let exec_hits =
+        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "python-exec-use");
+    assert!(exec_hits >= 1, "python-exec-use hit at least once, got {exec_hits}");
+    let print_hits =
+        count_where(&conn, tables::FINDINGS, cols::findings::RULE_ID, "python-print-call");
+    assert!(print_hits >= 1, "python-print-call hit at least once, got {print_hits}");
+}
+
+#[test]
 fn python_index_records_files_and_dispatches_extractor() {
     let tmp = TempDir::new().unwrap();
     let out = tmp.path().join("python.duckdb");
