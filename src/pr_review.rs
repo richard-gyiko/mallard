@@ -288,11 +288,17 @@ fn is_container_kind(kind: Option<SymbolKind>) -> bool {
     )
 }
 
-/// Pattern A2: drop a Function / Method comment whose anchor strictly
-/// encloses another emitted Function / Method comment in the same file.
-/// The outer fn restates "this function was edited"; the inner fn's
-/// comment carries the precise observation. Both must be Fn-family;
-/// containers are handled by Pattern A.
+/// Pattern A2: drop the OUTERMOST Function / Method comment in a
+/// nesting chain when it encloses at least one other emitted
+/// Function / Method. The outer fn restates "this function was edited";
+/// the chain's middle + innermost comments carry the precise
+/// observations.
+///
+/// Cascade-avoidance: prior versions dropped every outer in a chain,
+/// losing meaningful mid-chain symbols (e.g. axios #10920's
+/// `dispatchHttpRequest`). The fixed rule drops a comment only when
+/// it is the outermost fn in its enclosure chain — no other emitted
+/// fn strictly encloses it.
 fn suppress_outer_function_restate(pending: &mut Vec<PendingComment>) {
     let mut to_drop: Vec<usize> = Vec::new();
     for (i, outer) in pending.iter().enumerate() {
@@ -302,6 +308,26 @@ fn suppress_outer_function_restate(pending: &mut Vec<PendingComment>) {
         let Some((outer_start, outer_end)) = outer.anchor else {
             continue;
         };
+
+        // Skip if some OTHER pending fn strictly encloses this one —
+        // then this isn't the outermost in its chain, and a higher
+        // ancestor will be the one to drop.
+        let enclosed_by_other_fn = pending.iter().enumerate().any(|(j, parent)| {
+            if i == j || parent.comment.file != outer.comment.file {
+                return false;
+            }
+            if !is_fn_family(parent.symbol_kind) {
+                return false;
+            }
+            let Some((p_start, p_end)) = parent.anchor else {
+                return false;
+            };
+            p_start < outer_start && p_end > outer_end
+        });
+        if enclosed_by_other_fn {
+            continue;
+        }
+
         let encloses_inner_fn = pending.iter().enumerate().any(|(j, inner)| {
             if i == j || inner.comment.file != outer.comment.file {
                 return false;
@@ -794,6 +820,23 @@ mod precision_tests {
         assert_eq!(p.len(), 1, "outer fn dropped; inner fn kept");
         // Inner survives — anchor (1500, 4500).
         assert_eq!(p[0].anchor, Some((1500, 4500)));
+    }
+
+    #[test]
+    fn pattern_a2_chain_drops_only_outermost() {
+        // Chain A > B > C in same file. Cascade-avoidance: drop A
+        // (outermost) only. B (middle) is meaningful structural
+        // evidence — keep. C (innermost) trivially keeps.
+        let mut p = vec![
+            pc("a.js", (100, 9000), Some(SymbolKind::Function), "modified-body-logic"), // A
+            pc("a.js", (200, 8000), Some(SymbolKind::Function), "modified-body"),       // B
+            pc("a.js", (500, 1000), Some(SymbolKind::Function), "modified-body-logic"), // C
+        ];
+        suppress_outer_function_restate(&mut p);
+        assert_eq!(p.len(), 2, "outermost dropped; middle + innermost kept");
+        let kept_anchors: Vec<_> = p.iter().map(|c| c.anchor).collect();
+        assert!(kept_anchors.contains(&Some((200, 8000))), "middle B kept");
+        assert!(kept_anchors.contains(&Some((500, 1000))), "innermost C kept");
     }
 
     #[test]
