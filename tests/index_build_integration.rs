@@ -38,6 +38,25 @@ fn typescript_request(out: PathBuf) -> BuildRequest {
     }
 }
 
+fn javascript_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("sample-javascript")
+}
+
+fn javascript_request(out: PathBuf) -> BuildRequest {
+    BuildRequest {
+        root: javascript_fixture_root(),
+        sha: "js-fixture".to_string(),
+        rules_path: None,
+        out_path: out,
+        max_file_bytes: 1024 * 1024,
+        language_allow_list: vec!["typescript".to_string(), "tsx".to_string()],
+        slowest_files_n: 10,
+    }
+}
+
 fn fixture_rules() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -156,6 +175,31 @@ fn python_request(out: PathBuf) -> BuildRequest {
         language_allow_list: vec!["python".to_string()],
         slowest_files_n: 10,
     }
+}
+
+#[test]
+fn javascript_files_index_via_typescript_grammar() {
+    // Pilot Finding 3: `.js` / `.mjs` / `.cjs` / `.jsx` dispatched through
+    // the TS / TSX grammar so JavaScript-shop repos (axios, lodash, …)
+    // produce structural evidence instead of being silently skipped.
+    let tmp = TempDir::new().unwrap();
+    let out = tmp.path().join("javascript.duckdb");
+    let summary = build(javascript_request(out.clone())).unwrap();
+    assert!(out.exists(), "js index file written");
+    assert!(
+        summary.counters.symbols >= 5,
+        "expected ≥5 symbols (double, Counter, constructor, bump, main, Widget, formatLabel), got {}",
+        summary.counters.symbols
+    );
+
+    let conn = Connection::open(&out).unwrap();
+    // Three different extensions land — verify all three were indexed.
+    let total_files = count(&conn, tables::FILES);
+    assert!(total_files >= 3, "expected ≥3 indexed JS-family files, got {total_files}");
+    let calls = count_where(&conn, tables::EDGES, cols::edges::KIND, "calls");
+    assert!(calls >= 2, "expected ≥2 calls edges, got {calls}");
+    let imports = count_where(&conn, tables::EDGES, cols::edges::KIND, "imports");
+    assert!(imports >= 1, "expected ≥1 imports edge (app.mjs → lib.js), got {imports}");
 }
 
 #[test]

@@ -123,11 +123,16 @@ fn relative_path(root: &Path, path: &Path) -> Option<String> {
 
 fn detect_language(path: &Path, allow_list: &[String]) -> Option<String> {
     let ext = path.extension()?.to_str()?.to_lowercase();
+    // JavaScript routed through the TypeScript grammar — TS is a JS
+    // superset for the structural shapes we extract (function, class,
+    // method, call, member, import); JS code parses cleanly. `.jsx`
+    // uses the TSX grammar so JSX elements don't break the parse. See
+    // pilot Finding 3 in `mallard-eval/results/pilot.md`.
     let language = match ext.as_str() {
         "rs" => "rust",
         "py" => "python",
-        "ts" => "typescript",
-        "tsx" => "tsx",
+        "ts" | "js" | "mjs" | "cjs" => "typescript",
+        "tsx" | "jsx" => "tsx",
         _ => return None,
     };
     if allow_list.is_empty() || allow_list.iter().any(|l| l == language) {
