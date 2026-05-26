@@ -34,7 +34,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: mallard-windows-x86_64.zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -85,7 +85,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
