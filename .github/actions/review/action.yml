@@ -30,7 +30,7 @@ inputs:
   mallard-rev:
     description: "Git revision of mallard to build from. Defaults to the latest stable tag. Override with 'main' to track unreleased changes (no stability guarantee)."
     required: false
-    default: "v0.1.0"
+    default: "v0.1.2"
   post-comment:
     description: "Post the rendered review as a PR comment. Set to 'false' to dry-run."
     required: false
