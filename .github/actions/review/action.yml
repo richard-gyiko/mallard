@@ -28,10 +28,9 @@ inputs:
     required: false
     default: "${{ github.event.pull_request.head.sha }}"
   mallard-rev:
-    description: "Git revision of mallard to build from. Pin to a tag (e.g. 'v0.1.0') for reproducibility; 'main' tracks latest and is not stability-guaranteed."
+    description: "Git revision of mallard to build from. Defaults to the latest stable tag. Override with 'main' to track unreleased changes (no stability guarantee)."
     required: false
-    # TODO: bump to a pinned release tag once v0.1.0 is cut (issue: cargo install --git --rev requires a real ref).
-    default: "main"
+    default: "v0.1.0"
   post-comment:
     description: "Post the rendered review as a PR comment. Set to 'false' to dry-run."
     required: false
