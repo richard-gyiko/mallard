@@ -4,6 +4,25 @@ All notable changes to mallard are documented here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-26
+
+### Fixed
+
+- **Release workflow**: install `g++-aarch64-linux-gnu` and persist `CC_aarch64_*` / `CXX_aarch64_*` via `$GITHUB_ENV` so cc-rs picks up the C++ cross-compiler. v0.1.1's release matrix had only the C cross-compiler installed, so bundled DuckDB compilation failed on the `aarch64-unknown-linux-gnu` leg and no GitHub Release was created.
+
+### Changed
+
+- GitHub Action default `mallard-rev` bumped `v0.1.0` → `v0.1.2`. Skips v0.1.1 (no published binaries).
+
+## [0.1.1] — 2026-05-26
+
+Tagged but not fully released — the `aarch64-unknown-linux-gnu` build leg failed (missing C++ cross-compiler). No binary assets on the Releases page for this tag. v0.1.2 supersedes it.
+
+### Changed
+
+- **Enable libduckdb-sys `bundled` feature** on the `duckdb` dependency. v0.1.0's source install (`cargo install --git`) failed on Linux because the system was expected to provide `libduckdb`. Bundled compiles the DuckDB amalgamation as part of the cargo build — works on every platform but adds ~5-10 min to a cold build and ~10 MB to the binary.
+- GitHub Action default `mallard-rev` pinned to `v0.1.0` (was unpinned `"main"`).
+
 ## [0.1.0] — 2026-05-26
 
 First public release. Mallard ships as a deterministic, citation-grounded code-index for verifying AI-generated code changes.
@@ -34,5 +53,7 @@ First public release. Mallard ships as a deterministic, citation-grounded code-i
 - **Deterministic only.** No LLM integration, ever — per ADR-0013.
 - **License:** MIT.
 
-[Unreleased]: https://github.com/richard-gyiko/mallard/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/richard-gyiko/mallard/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/richard-gyiko/mallard/releases/tag/v0.1.2
+[0.1.1]: https://github.com/richard-gyiko/mallard/releases/tag/v0.1.1
 [0.1.0]: https://github.com/richard-gyiko/mallard/releases/tag/v0.1.0
