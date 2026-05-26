@@ -5,28 +5,22 @@ on:
     branches: [main]
   pull_request:
 
-# DUCKDB_DOWNLOAD_LIB is set in .cargo/config.toml to speed up Windows local
-# dev (downloads a prebuilt DuckDB DLL instead of compiling from source).
-# On Linux CI the download flow doesn't produce a linkable libduckdb.so;
-# fall back to libduckdb-sys's `bundled` feature (static compile). Slower
-# build but reliable across the whole runner matrix.
-env:
-  DUCKDB_DOWNLOAD_LIB: "0"
-
 jobs:
   test:
     name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip Windows-only DuckDB-download override
+        # `.cargo/config.toml` sets DUCKDB_DOWNLOAD_LIB=1 to speed up local
+        # Windows dev. cargo's `[env]` table applies before workflow `env`,
+        # so we can't override from the workflow — delete the config file
+        # on CI so libduckdb-sys falls back to its `bundled` feature
+        # (static compile from source).
+        run: rm -f .cargo/config.toml
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # Factor DUCKDB_DOWNLOAD_LIB into the cache key so the bundled
-          # (CI) and download (Windows local) builds get separate caches.
-          # First cold build compiles DuckDB C++ (~5-10 min); subsequent
-          # builds restore from cache (~30s).
-          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST DUCKDB_DOWNLOAD_LIB"
           shared-key: "linux-bundled"
       - name: Build
         run: cargo build --release --locked
@@ -38,12 +32,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Strip Windows-only DuckDB-download override
+        run: rm -f .cargo/config.toml
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST DUCKDB_DOWNLOAD_LIB"
           shared-key: "linux-bundled"
       - name: Format
         run: cargo fmt --check
