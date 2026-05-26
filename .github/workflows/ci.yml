@@ -21,6 +21,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Factor DUCKDB_DOWNLOAD_LIB into the cache key so the bundled
+          # (CI) and download (Windows local) builds get separate caches.
+          # First cold build compiles DuckDB C++ (~5-10 min); subsequent
+          # builds restore from cache (~30s).
+          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST DUCKDB_DOWNLOAD_LIB"
+          shared-key: "linux-bundled"
       - name: Build
         run: cargo build --release --locked
       - name: Test
@@ -35,6 +42,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: "CARGO CC CFLAGS CXX CMAKE RUST DUCKDB_DOWNLOAD_LIB"
+          shared-key: "linux-bundled"
       - name: Format
         run: cargo fmt --check
       - name: Clippy

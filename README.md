@@ -1,5 +1,9 @@
 # mallard
 
+[![ci](https://github.com/richard-gyiko/mallard/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/richard-gyiko/mallard/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/richard-gyiko/mallard?sort=semver)](https://github.com/richard-gyiko/mallard/releases)
+[![license](https://img.shields.io/github/license/richard-gyiko/mallard)](LICENSE)
+
 **Verify what your AI agent actually changed.**
 
 Mallard is a deterministic, citation-grounded code-index for the era where AI coding agents author a large share of merged PRs. It catches the structural defects agents introduce — renamed symbols with abandoned callers, removed functions still imported, modified behaviors with no test update — using a per-SHA DuckDB graph index. Local. Single binary. Zero LLM. Every result anchored to a symbol ID + `file:line`.
@@ -82,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: richard-gyiko/mallard/.github/actions/review@main
+      - uses: richard-gyiko/mallard/.github/actions/review@v0.1.0
         with:
           max-comments: 10
 ```
