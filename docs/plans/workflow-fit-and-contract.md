@@ -199,7 +199,7 @@ Serena MCP does this. Buys type-accurate caller graph. Costs: ~6 months engineer
 ## What this DOESN'T extend (deliberate)
 
 - **No new languages** (Go/Java/Ruby/C#). Python+TS+Rust+JS already cover ~80% of agent traffic per State-of-AI-PRs research.
-- **No MCP wrapper.** CLI + Skill is consensus distribution mid-2026 ([Scalekit](https://www.scalekit.com/blog/mcp-vs-cli-use), [Apideck](https://www.apideck.com/blog/mcp-server-eating-context-window-cli-alternative)).
+- ~~**No MCP wrapper.**~~ **Superseded — see [ADR-0014](../decisions/0014-verification-layer-vs-comprehension-layer.md).** The May-2026 read was that CLI + Skill was sufficient distribution ([Scalekit](https://www.scalekit.com/blog/mcp-vs-cli-use), [Apideck](https://www.apideck.com/blog/mcp-server-eating-context-window-cli-alternative)). MCP-native code-graph tools (e.g. codegraph, ~37k★, auto-configured into 8 agents) since demonstrated MCP is the adoption channel for Cursor / Codex / Gemini, not just Claude Code. Decision reversed: a thin `mallard mcp` wrapper over the existing primitives is planned — still deterministic-only, MCP as transport not LLM-synthesis surface.
 - **No LLM synthesis.** Negates moat. Mallard's pitch: "we don't hallucinate."
 - **No semantic / type-aware analysis.** Stay structural. Adding type inference = ~6-12 months work, kills shipping velocity.
 - **No cross-repo / monorepo dep graph.** Single-repo scope today. Revisit if user demand warrants.

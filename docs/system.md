@@ -2,9 +2,9 @@
 
 ## Overview
 
-Mallard is an AI-native repository index. It builds a persistent symbolic graph of a codebase and serves that graph to LLM-driven workflows. The first product surface is pull-request review.
+Mallard is a deterministic, citation-grounded structural code-index for the era of AI-authored PRs. It builds a per-SHA symbolic graph of a codebase and uses it to **verify what changed between two commits** — which symbols were added, removed, or modified, who still calls a symbol that was deleted, what was left imported, and what shipped without a test. The first and permanent product surface is pull-request review.
 
-Core thesis: LLMs are strong enough; the bottleneck is repository context retrieval. Mallard treats repository structure as durable knowledge — symbols, imports, callers, dependencies, tests, ownership — rather than transient embedding chunks. The LLM is a consumer of the index, not the center of the system.
+Core thesis: the scarce thing is not code comprehension but **cross-SHA verification an agent or reviewer can trust**. Live code-intelligence tools — LSP, embedding indexes, single-state code graphs — answer "how does X work now"; mallard answers "what did this diff change, and what did it break" — reproducibly, from a base/head index pair, every finding anchored to a symbol ID + `file:line`. The index is the product; there is no LLM in the loop ([decisions/0011-deterministic-only-pr-review-v1.md](decisions/0011-deterministic-only-pr-review-v1.md), [decisions/0013-kill-phase-d-pivot-agent-verification.md](decisions/0013-kill-phase-d-pivot-agent-verification.md)). The verification-layer-vs-comprehension-layer positioning is [decisions/0014-verification-layer-vs-comprehension-layer.md](decisions/0014-verification-layer-vs-comprehension-layer.md).
 
 ## Modules
 
