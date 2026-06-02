@@ -54,6 +54,7 @@ fn pr_review_emits_structural_rule_comments_on_changed_files() {
         max_comments: 20,
         diff_hunks: None,
         ignore_test_trivia: false,
+        flag_test_gaps: false,
     })
     .unwrap();
 
@@ -91,6 +92,7 @@ fn pr_review_respects_max_comments_budget() {
         max_comments: 1,
         diff_hunks: None,
         ignore_test_trivia: false,
+        flag_test_gaps: false,
     })
     .unwrap();
     assert_eq!(result.comments.len(), 1, "budget should cap at 1");
@@ -184,6 +186,7 @@ fn diff_hunks_overlap_emits_modified_body_touched() {
         max_comments: 20,
         diff_hunks: Some(mallard::pr_review::DiffHunks { files }),
         ignore_test_trivia: false,
+        flag_test_gaps: false,
     })
     .unwrap();
 
@@ -218,6 +221,7 @@ fn pattern_b_structural_rule_gated_by_diff_hunk_overlap() {
         max_comments: 20,
         diff_hunks: None,
         ignore_test_trivia: false,
+        flag_test_gaps: false,
     })
     .unwrap();
     let baseline_rule_hits = baseline
@@ -247,6 +251,7 @@ fn pattern_b_structural_rule_gated_by_diff_hunk_overlap() {
         max_comments: 20,
         diff_hunks: Some(mallard::pr_review::DiffHunks { files }),
         ignore_test_trivia: false,
+        flag_test_gaps: false,
     })
     .unwrap();
     let gated_rule_hits = gated
@@ -275,6 +280,7 @@ fn pr_review_markdown_render_includes_badge() {
         max_comments: 5,
         diff_hunks: None,
         ignore_test_trivia: false,
+        flag_test_gaps: false,
     })
     .unwrap();
     let md = pr_review::render_markdown(&result);

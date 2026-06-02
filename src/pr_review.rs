@@ -15,7 +15,7 @@
 //! ADR-0010 tier surfaces verbatim on each comment: reviewers filter to
 //! `extracted` only on a noisy PR or expand to `ambiguous` on demand.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,16 @@ pub struct PrReviewRequest {
     /// every overlap surfaced.
     #[serde(default)]
     pub ignore_test_trivia: bool,
+    /// When `true`, append a test-gap note to `modified-body` comments
+    /// whose symbol has *zero* test seams in the index — a modified
+    /// callable no test anywhere exercises. Off by default: on a
+    /// low-coverage repo every untested change would annotate, so the
+    /// team opts in to ask for the signal. Scoped to `modified-body`
+    /// (outbound call set changed — hardest structural evidence the
+    /// behavior moved); `modified-body-logic` / `-touched` are excluded
+    /// as too weak. Mirrors the opt-in posture of `ignore_test_trivia`.
+    #[serde(default)]
+    pub flag_test_gaps: bool,
 }
 
 /// Per-file diff hunks consumed by the review pipeline.
@@ -163,6 +173,15 @@ pub struct ReviewComment {
     pub body: String,
 }
 
+/// Per-file review knobs threaded into `review_file`. Bundled into one
+/// struct so the function stays under clippy's argument-count limit and
+/// the call site reads as a named set rather than a row of bare bools.
+#[derive(Clone, Copy)]
+struct ReviewFlags {
+    ignore_test_trivia: bool,
+    flag_test_gaps: bool,
+}
+
 /// Internal-only carrier: review comment plus the metadata needed to
 /// apply post-processing filters (container suppression, diff overlap).
 /// Not serialised — public `ReviewComment` stays stable.
@@ -197,7 +216,10 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
             &head,
             path,
             hunks,
-            req.ignore_test_trivia,
+            ReviewFlags {
+                ignore_test_trivia: req.ignore_test_trivia,
+                flag_test_gaps: req.flag_test_gaps,
+            },
             &mut pending,
             &mut summary,
         )?;
@@ -444,7 +466,7 @@ fn review_file(
     head: &IndexReader,
     path: &str,
     diff_hunks: &[DiffRange],
-    ignore_test_trivia: bool,
+    flags: ReviewFlags,
     out: &mut Vec<PendingComment>,
     summary: &mut PrReviewSummary,
 ) -> Result<()> {
@@ -542,13 +564,25 @@ fn review_file(
 
         if !added_callees.is_empty() || !removed_callees.is_empty() {
             summary.symbols_modified_body += 1;
-            let body =
+            let mut body =
                 render_modified_body_comment(&sym.qualified_name, &added_callees, &removed_callees);
             let tier = if head_calls.iter().all(|c| !c.starts_with('[')) {
                 "extracted"
             } else {
                 "inferred"
             };
+            // Stage 5b — test-gap (opt-in). A modified callable that no
+            // test in the index exercises ships a behavior change without
+            // coverage. Append a note to this comment rather than emit a
+            // second one. Zero-seam only: "has tests but none touched" is
+            // a semantic staleness call, out of the deterministic layer.
+            if flags.flag_test_gaps
+                && is_callable_kind(sym.kind)
+                && !is_test_symbol(&sym.path, Some(&sym.qualified_name))
+                && collect_test_seams(head, &sym.id)?.is_empty()
+            {
+                body.push_str(&test_gap_addendum(&sym.qualified_name));
+            }
             out.push(PendingComment {
                 comment: ReviewComment {
                     file: sym.path.clone(),
@@ -633,7 +667,7 @@ fn review_file(
                     .iter()
                     .map(|r| r.end.saturating_sub(r.start) + 1)
                     .sum();
-                if ignore_test_trivia
+                if flags.ignore_test_trivia
                     && is_test_symbol(&sym.path, Some(sym.qualified_name.as_str()))
                     && total_lines <= 2
                 {
@@ -687,6 +721,33 @@ fn collect_outbound_callee_names(reader: &IndexReader, id: &SymbolId) -> Vec<Str
     names.sort();
     names.dedup();
     names
+}
+
+/// Collect inbound test-seam symbols for a symbol id: inbound neighbors
+/// whose source is classified as a test symbol. Mirrors
+/// `IndexReader::test_seams` but keys on the exact symbol id instead of
+/// the qualified name — avoids the same-name ambiguity ADR-0008 / 0010
+/// warn about when a short name has multiple callable matches.
+fn collect_test_seams(reader: &IndexReader, id: &SymbolId) -> Result<Vec<SymbolRecord>> {
+    let edges = reader.neighbors(id, &[], Direction::In)?;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for e in edges {
+        let caller = e.src;
+        if is_test_symbol(&caller.path, Some(&caller.qualified_name))
+            && seen.insert(caller.id.0.clone())
+        {
+            out.push(caller);
+        }
+    }
+    Ok(out)
+}
+
+fn test_gap_addendum(qualified_name: &str) -> String {
+    format!(
+        "\n\n⚠️ **Test gap:** no test in the index exercises `{qualified_name}` — \
+        this behavior change ships without coverage.",
+    )
 }
 
 fn render_modified_body_comment(
@@ -763,6 +824,7 @@ pub fn from_paths(
         max_comments,
         diff_hunks: None,
         ignore_test_trivia: false,
+        flag_test_gaps: false,
     })
 }
 
@@ -985,6 +1047,14 @@ mod precision_tests {
         assert!(!is_test_path("src/foo.rs"));
         assert!(!is_test_path("lib/widget.ts"));
         assert!(!is_test_path("src/test_helpers.rs"));
+    }
+
+    #[test]
+    fn test_gap_addendum_wording() {
+        let note = test_gap_addendum("crate::auth::validate_user");
+        assert!(note.contains("Test gap"), "addendum labels the gap");
+        assert!(note.contains("validate_user"), "addendum cites the symbol");
+        assert!(note.starts_with("\n\n"), "appends as a separate paragraph");
     }
 
     #[test]

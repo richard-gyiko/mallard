@@ -14,3 +14,6 @@ docs/.plans-internal/
 # Added by cargo
 
 /target
+
+# Claude Code session-local scheduler lock
+.claude/scheduled_tasks.lock

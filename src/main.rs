@@ -61,6 +61,12 @@ struct PrReviewArgs {
     /// correct but adds no review value. Off by default.
     #[arg(long = "ignore-test-trivia", default_value_t = false)]
     ignore_test_trivia: bool,
+    /// Append a test-gap note to `modified-body` comments whose symbol
+    /// has zero test seams in the index — a modified callable no test
+    /// exercises. Off by default; on a low-coverage repo every untested
+    /// change would annotate.
+    #[arg(long = "flag-test-gaps", default_value_t = false)]
+    flag_test_gaps: bool,
     #[arg(long = "max-comments", default_value_t = 10)]
     max_comments: usize,
     /// Output format: `json` (default) or `markdown`.
@@ -331,6 +337,7 @@ fn run_pr_review(args: PrReviewArgs) -> anyhow::Result<()> {
         max_comments: args.max_comments,
         diff_hunks,
         ignore_test_trivia: args.ignore_test_trivia,
+        flag_test_gaps: args.flag_test_gaps,
     })?;
     match args.format.as_str() {
         "markdown" => {
