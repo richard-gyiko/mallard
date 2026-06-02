@@ -290,3 +290,77 @@ fn pr_review_markdown_render_includes_badge() {
         "badge prefix present in markdown"
     );
 }
+
+fn caller_drop_root(side: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("caller-drop")
+        .join(side)
+}
+
+fn build_at_root(root: PathBuf, sha: &str, out: PathBuf) {
+    let req = BuildRequest {
+        root,
+        sha: sha.to_string(),
+        rules_path: None,
+        rules_bundled: false,
+        out_path: out,
+        max_file_bytes: 1024 * 1024,
+        language_allow_list: vec!["rust".to_string()],
+        slowest_files_n: 10,
+    };
+    build(req).unwrap();
+}
+
+#[test]
+fn pr_review_flags_caller_drop_for_removed_symbol() {
+    // base defines `target` + `caller` (which calls target → resolves).
+    // head removes `target` but keeps `caller` calling it → the Calls edge
+    // is left unresolved. The review must surface a `caller-drop`
+    // structural-rule finding naming the removed symbol.
+    let tmp = TempDir::new().unwrap();
+    let base_db = tmp.path().join("base.duckdb");
+    let head_db = tmp.path().join("head.duckdb");
+    build_at_root(caller_drop_root("base"), "base-sha", base_db.clone());
+    build_at_root(caller_drop_root("head"), "head-sha", head_db.clone());
+
+    let result = pr_review::run(PrReviewRequest {
+        base_db,
+        head_db,
+        changed_files: vec!["lib.rs".to_string()],
+        max_comments: 20,
+        diff_hunks: None,
+        ignore_test_trivia: false,
+        flag_test_gaps: false,
+    })
+    .unwrap();
+
+    let drop = result
+        .comments
+        .iter()
+        .find(|c| c.source_kind == "caller-drop")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a caller-drop finding; source_kinds present: {:?}",
+                result
+                    .comments
+                    .iter()
+                    .map(|c| c.source_kind.as_str())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(drop.confidence_tier, "structural-rule");
+    assert!(
+        drop.body.contains("target"),
+        "body should name the removed symbol: {}",
+        drop.body
+    );
+
+    // Rendered markdown leads with the Structural breakage section.
+    let md = pr_review::render_markdown(&result);
+    assert!(
+        md.contains("## ⚠️ Structural breakage"),
+        "markdown should carry the breakage section"
+    );
+}

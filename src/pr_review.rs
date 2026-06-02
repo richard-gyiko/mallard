@@ -22,7 +22,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::EdgeKind;
 use crate::core::{Result, SymbolId, SymbolKind};
-use crate::query::{Direction, FindingFilter, IndexReader, NeighborEdge, SymbolRecord};
+use crate::query::{
+    Direction, FindingFilter, IndexReader, NeighborEdge, SymbolRecord, UnresolvedCallerHit,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrReviewRequest {
@@ -224,6 +226,15 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
             &mut summary,
         )?;
     }
+
+    // Stage 6 — cross-SHA breakage (caller-drop / dead-import). Symbols
+    // removed or renamed in this PR whose call sites / imports were not
+    // updated. A deterministic fact, and the signal a live single-state
+    // index structurally cannot compute (it holds one snapshot, not a
+    // base/head pair). Scans the whole head index — a stale caller can
+    // live outside the diff. Runs before suppression; its comments carry
+    // anchor: None so the restate passes ignore them (like rule findings).
+    emit_caller_drops(&base, &head, &mut pending)?;
 
     // Pattern A — container restate suppression. A comment on a
     // container kind (class / struct / interface / type alias / module)
@@ -750,6 +761,77 @@ fn test_gap_addendum(qualified_name: &str) -> String {
     )
 }
 
+/// Short (unqualified) name: last segment after `::` or `.`. Matches the
+/// `dst_unresolved` form the resolver records for unresolved call / import
+/// edges, so removed-symbol names line up with the unresolved scan.
+fn short_name(qualified_name: &str) -> &str {
+    let after_colon = qualified_name.rsplit("::").next().unwrap_or(qualified_name);
+    after_colon.rsplit('.').next().unwrap_or(after_colon)
+}
+
+/// Stage 6 — caller-drop / dead-import. For every symbol removed between
+/// base and head, scan the head index for unresolved `Calls` / `Imports`
+/// edges still referencing its short name. Each hit is a structural
+/// breakage: the definition is gone but a call site or import was left
+/// behind — the Kiro "updated the definition, missed the call sites"
+/// failure mode. Tier `structural-rule`: a deterministic fact.
+///
+/// Clean renames produce nothing (every site updated → no unresolved
+/// refs to the old name); a rename that misses sites fires here. Comments
+/// carry `anchor: None` / `symbol_kind: None` so the container / outer-fn
+/// restate passes leave them untouched — these are not modified-body
+/// restatements, exactly like structural-rule findings.
+fn emit_caller_drops(
+    base: &IndexReader,
+    head: &IndexReader,
+    pending: &mut Vec<PendingComment>,
+) -> Result<()> {
+    let diff = crate::query::symbol_diff(base, head)?;
+    if diff.removed.is_empty() {
+        return Ok(());
+    }
+    let mut names: Vec<String> = diff
+        .removed
+        .iter()
+        .map(|s| short_name(&s.qualified_name).to_string())
+        .collect();
+    names.sort();
+    names.dedup();
+
+    let hits: Vec<UnresolvedCallerHit> =
+        head.unresolved_callers(&names, &[EdgeKind::Calls, EdgeKind::Imports])?;
+    for hit in hits {
+        let (source_kind, verb) = match hit.edge_kind {
+            EdgeKind::Imports => ("dead-import", "imported"),
+            _ => ("caller-drop", "called"),
+        };
+        let caller = &hit.caller;
+        pending.push(PendingComment {
+            comment: ReviewComment {
+                file: caller.path.clone(),
+                line: caller.anchor.start_line,
+                end_line: caller.anchor.end_line,
+                symbol_qualified_name: Some(caller.qualified_name.clone()),
+                symbol_id: Some(caller.id.0.clone()),
+                source_kind: source_kind.to_string(),
+                confidence_tier: "structural-rule".to_string(),
+                rule_id: None,
+                body: format!(
+                    "Removed `{}` — still {} at `{}:{}` (in `{}`).",
+                    hit.unresolved_name,
+                    verb,
+                    caller.path,
+                    caller.anchor.start_line,
+                    caller.qualified_name
+                ),
+            },
+            symbol_kind: None,
+            anchor: None,
+        });
+    }
+    Ok(())
+}
+
 fn render_modified_body_comment(
     qualified_name: &str,
     added: &[String],
@@ -795,7 +877,22 @@ pub fn render_markdown(result: &PrReviewResult) -> String {
         result.summary.comments_emitted,
         result.summary.comments_dropped_to_budget,
     ));
-    for c in &result.comments {
+    // Cross-SHA breakage leads the review as a prominent bullet list —
+    // these sites often live outside the diff (so they can't be inline
+    // comments) and are the highest-signal finding mallard emits.
+    let (breakage, rest): (Vec<&ReviewComment>, Vec<&ReviewComment>) = result
+        .comments
+        .iter()
+        .partition(|c| c.source_kind == "caller-drop" || c.source_kind == "dead-import");
+    if !breakage.is_empty() {
+        buf.push_str("## ⚠️ Structural breakage\n\n");
+        for c in &breakage {
+            buf.push_str(&format!("- {}\n", c.body));
+        }
+        buf.push('\n');
+    }
+
+    for c in &rest {
         let badge = format!("[{}]", c.confidence_tier);
         let rule = c
             .rule_id
