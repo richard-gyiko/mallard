@@ -173,6 +173,15 @@ pub struct ReviewComment {
     pub body: String,
 }
 
+/// Per-file review knobs threaded into `review_file`. Bundled into one
+/// struct so the function stays under clippy's argument-count limit and
+/// the call site reads as a named set rather than a row of bare bools.
+#[derive(Clone, Copy)]
+struct ReviewFlags {
+    ignore_test_trivia: bool,
+    flag_test_gaps: bool,
+}
+
 /// Internal-only carrier: review comment plus the metadata needed to
 /// apply post-processing filters (container suppression, diff overlap).
 /// Not serialised — public `ReviewComment` stays stable.
@@ -207,8 +216,10 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
             &head,
             path,
             hunks,
-            req.ignore_test_trivia,
-            req.flag_test_gaps,
+            ReviewFlags {
+                ignore_test_trivia: req.ignore_test_trivia,
+                flag_test_gaps: req.flag_test_gaps,
+            },
             &mut pending,
             &mut summary,
         )?;
@@ -455,8 +466,7 @@ fn review_file(
     head: &IndexReader,
     path: &str,
     diff_hunks: &[DiffRange],
-    ignore_test_trivia: bool,
-    flag_test_gaps: bool,
+    flags: ReviewFlags,
     out: &mut Vec<PendingComment>,
     summary: &mut PrReviewSummary,
 ) -> Result<()> {
@@ -566,7 +576,7 @@ fn review_file(
             // coverage. Append a note to this comment rather than emit a
             // second one. Zero-seam only: "has tests but none touched" is
             // a semantic staleness call, out of the deterministic layer.
-            if flag_test_gaps
+            if flags.flag_test_gaps
                 && is_callable_kind(sym.kind)
                 && !is_test_symbol(&sym.path, Some(&sym.qualified_name))
                 && collect_test_seams(head, &sym.id)?.is_empty()
@@ -657,7 +667,7 @@ fn review_file(
                     .iter()
                     .map(|r| r.end.saturating_sub(r.start) + 1)
                     .sum();
-                if ignore_test_trivia
+                if flags.ignore_test_trivia
                     && is_test_symbol(&sym.path, Some(sym.qualified_name.as_str()))
                     && total_lines <= 2
                 {
