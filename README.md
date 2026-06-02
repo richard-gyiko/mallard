@@ -6,14 +6,14 @@
 
 **Verify what your AI agent actually changed.**
 
-Mallard is a deterministic, citation-grounded code-index for the era where AI coding agents author a large share of merged PRs. It catches the structural defects agents introduce — renamed symbols with abandoned callers, removed functions still imported, modified behaviors with no test update — using a per-SHA DuckDB graph index. Local. Single binary. Zero LLM. Every result anchored to a symbol ID + `file:line`.
+Mallard is a deterministic, citation-grounded code-index for the era where AI coding agents author a large share of merged PRs. It catches the structural defects agents introduce — renamed symbols with abandoned callers, removed functions still imported, modified functions no test in the index exercises — using a per-SHA DuckDB graph index. Local. Single binary. Zero LLM. Every result anchored to a symbol ID + `file:line`.
 
 ```text
 Agent commits PR → mallard runs → structural delta posted
 ─────────────────────────────────────────────────────────
 🦆 Removed `auth_check` — still called at api/handlers.py:42
 🦆 Renamed `parse_token` → `parseToken` — 3 of 4 callers updated
-🦆 Modified `validate_user` — no test changes detected
+🦆 Modified `validate_user` — no test in the index exercises it
 ```
 
 Languages: **Rust · Python · TypeScript · JavaScript**.

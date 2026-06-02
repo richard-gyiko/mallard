@@ -15,7 +15,7 @@
 //! ADR-0010 tier surfaces verbatim on each comment: reviewers filter to
 //! `extracted` only on a noisy PR or expand to `ambiguous` on demand.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,16 @@ pub struct PrReviewRequest {
     /// every overlap surfaced.
     #[serde(default)]
     pub ignore_test_trivia: bool,
+    /// When `true`, append a test-gap note to `modified-body` comments
+    /// whose symbol has *zero* test seams in the index — a modified
+    /// callable no test anywhere exercises. Off by default: on a
+    /// low-coverage repo every untested change would annotate, so the
+    /// team opts in to ask for the signal. Scoped to `modified-body`
+    /// (outbound call set changed — hardest structural evidence the
+    /// behavior moved); `modified-body-logic` / `-touched` are excluded
+    /// as too weak. Mirrors the opt-in posture of `ignore_test_trivia`.
+    #[serde(default)]
+    pub flag_test_gaps: bool,
 }
 
 /// Per-file diff hunks consumed by the review pipeline.
@@ -202,6 +212,15 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
             &mut summary,
         )?;
     }
+
+    // Stage 5b — test-gap. For every modified callable that carries
+    // inbound test seams in the head index, check whether the PR touched
+    // any of those seams. None touched → emit a `test-gap` comment. This
+    // is the README headline signal ("Modified X — no test changes
+    // detected") and the one `test_gap`-category finding reachable
+    // deterministically. Runs before suppression so test-gap comments
+    // participate in the container / budget passes. Tier `inferred`.
+    emit_test_gaps(&head, &req, &mut pending)?;
 
     // Pattern A — container restate suppression. A comment on a
     // container kind (class / struct / interface / type alias / module)
@@ -689,6 +708,82 @@ fn collect_outbound_callee_names(reader: &IndexReader, id: &SymbolId) -> Vec<Str
     names
 }
 
+/// Collect inbound test-seam symbols for a symbol id: inbound neighbors
+/// whose source is classified as a test symbol. Mirrors
+/// `IndexReader::test_seams` but keys on the exact symbol id instead of
+/// the qualified name — avoids the same-name ambiguity ADR-0008 / 0010
+/// warn about when a short name has multiple callable matches.
+fn collect_test_seams(reader: &IndexReader, id: &SymbolId) -> Result<Vec<SymbolRecord>> {
+    let edges = reader.neighbors(id, &[], Direction::In)?;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for e in edges {
+        let caller = e.src;
+        if is_test_symbol(&caller.path, Some(&caller.qualified_name))
+            && seen.insert(caller.id.0.clone())
+        {
+            out.push(caller);
+        }
+    }
+    Ok(out)
+}
+
+fn test_gap_addendum(qualified_name: &str) -> String {
+    format!(
+        "\n\n⚠️ **Test gap:** no test in the index exercises `{qualified_name}` — \
+        this behavior change ships without coverage.",
+    )
+}
+
+/// Stage 5b — test-gap annotation. Opt-in (`flag_test_gaps`). For each
+/// `modified-body` comment (outbound call set changed → hardest evidence
+/// the behavior moved) on a non-test callable, resolve its head-index
+/// test seams. Zero seams → the symbol is modified yet no test anywhere
+/// exercises it: append a note to the existing comment rather than emit a
+/// second one (one comment per symbol, no line-doubling).
+///
+/// Deliberately narrow. The "has tests but none were touched this PR"
+/// variant is NOT emitted: a green untouched test is the normal state of
+/// a correct PR, and deterministically we can't tell "test now stale"
+/// from "test still valid" — that's a semantic call, LLM territory. Zero
+/// coverage of a changed symbol is a structural fact mallard can stand
+/// behind.
+fn emit_test_gaps(
+    head: &IndexReader,
+    req: &PrReviewRequest,
+    pending: &mut [PendingComment],
+) -> Result<()> {
+    if !req.flag_test_gaps {
+        return Ok(());
+    }
+    for pc in pending.iter_mut() {
+        // modified-body only — exclude -logic / -touched (weaker signals).
+        if pc.comment.source_kind != "modified-body" {
+            continue;
+        }
+        let Some(kind) = pc.symbol_kind else { continue };
+        if !is_callable_kind(kind) {
+            continue;
+        }
+        let Some(qname) = pc.comment.symbol_qualified_name.clone() else {
+            continue;
+        };
+        // Never flag a test for lacking tests.
+        if is_test_symbol(&pc.comment.file, Some(&qname)) {
+            continue;
+        }
+        let Some(id_str) = pc.comment.symbol_id.as_ref() else {
+            continue;
+        };
+        let seams = collect_test_seams(head, &SymbolId(id_str.clone()))?;
+        if !seams.is_empty() {
+            continue; // covered — no gap
+        }
+        pc.comment.body.push_str(&test_gap_addendum(&qname));
+    }
+    Ok(())
+}
+
 fn render_modified_body_comment(
     qualified_name: &str,
     added: &[String],
@@ -763,6 +858,7 @@ pub fn from_paths(
         max_comments,
         diff_hunks: None,
         ignore_test_trivia: false,
+        flag_test_gaps: false,
     })
 }
 
@@ -985,6 +1081,14 @@ mod precision_tests {
         assert!(!is_test_path("src/foo.rs"));
         assert!(!is_test_path("lib/widget.ts"));
         assert!(!is_test_path("src/test_helpers.rs"));
+    }
+
+    #[test]
+    fn test_gap_addendum_wording() {
+        let note = test_gap_addendum("crate::auth::validate_user");
+        assert!(note.contains("Test gap"), "addendum labels the gap");
+        assert!(note.contains("validate_user"), "addendum cites the symbol");
+        assert!(note.starts_with("\n\n"), "appends as a separate paragraph");
     }
 
     #[test]
