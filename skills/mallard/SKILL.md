@@ -105,6 +105,18 @@ mallard symbol-diff --base-db .mallard/base.duckdb --head-db .mallard/head.duckd
 
 Then for each removed symbol, check unresolved callers in HEAD to catch missed updates.
 
+### Untested-change detection (authoring time)
+
+After modifying a symbol, flag it when no test exercises it — the structural form of "this behavior change ships without coverage." `test-seams` returns an empty `value` array for a symbol with no test callers:
+
+```bash
+mallard query test-seams --index .mallard/head.duckdb --qname process_request \
+  | jq -e '.value | length > 0' >/dev/null \
+  || echo "⚠️ process_request has no test seams — modified without coverage"
+```
+
+This is the same fact the `pr-review --flag-test-gaps` flag automates in CI; at authoring time you call it per changed symbol. Zero-seam is a structural fact. "Has tests but none were touched" is a staleness judgment mallard does NOT make — that's yours (or the LLM's) to decide.
+
 ## When to refuse
 
 - User asks about runtime behavior, types, generics resolution → mallard sees structure only. Use LSP / rust-analyzer / pyright.
@@ -124,11 +136,37 @@ Then for each removed symbol, check unresolved callers in HEAD to catch missed u
 
 Full schema reference: `docs/cli-json-contract.md` in the mallard repo.
 
+## PR review (`pr-review`) — unversioned
+
+Deterministic structural review of a diff. Powers the GitHub Action; an agent can also run it directly. Needs base + head indexes (build both per the `symbol-diff` checkout/worktree steps above) plus the changed-file list.
+
+```bash
+mallard pr-review \
+  --base-db .mallard/base.duckdb \
+  --head-db .mallard/head.duckdb \
+  --files src/auth.rs,src/api.rs \
+  --max-comments 10 \
+  --format markdown
+```
+
+Emits review comments — added / removed / `modified-body` signals plus structural-rule findings — each tagged with a confidence tier (`structural-rule` > `extracted` > `inferred` > `ambiguous`). Flags:
+
+| flag | effect |
+|---|---|
+| `--files a,b` | comma-separated changed paths, relative to repo root (required) |
+| `--diff-hunks <path>` | JSON from `mallard diff-hunks`; enables `modified-body-touched` line-overlap detection and scopes rule findings to changed lines (cuts noise from pre-existing code) |
+| `--ignore-test-trivia` | drop `modified-body-touched` on test files when the diff overlap is ≤ 2 lines |
+| `--flag-test-gaps` | annotate `modified-body` comments whose symbol has zero test seams. Opt-in: on a low-coverage repo every untested change annotates |
+| `--max-comments N` | comment budget; lowest-tier dropped first (default 10) |
+| `--format json\|markdown` | output (default `json`) |
+
+Does NOT carry `schema_version` — shape may evolve via binary SemVer. Prefer the versioned query commands when you only need raw structural facts.
+
 ## Power-user surface (unversioned)
 
 These commands exist but DON'T carry `schema_version`. Use only when the 4 versioned commands above don't fit:
 
-`query symbol`, `query neighbors`, `query expand`, `query findings`, `query symbols-in-file`, `query edges-by-file`, `query unresolved-callers`, `query importers-of`, `query files`, `query metadata`, `pr-review`, `diff-hunks`.
+`query symbol`, `query neighbors`, `query expand`, `query findings`, `query symbols-in-file`, `query edges-by-file`, `query unresolved-callers`, `query importers-of`, `query files`, `query metadata`, `diff-hunks` (the JSON feeder for `pr-review --diff-hunks`).
 
 Their shapes are documented in `docs/cli-json-contract.md` but may evolve via SemVer of the binary.
 
