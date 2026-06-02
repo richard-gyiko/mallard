@@ -39,6 +39,10 @@ inputs:
     description: "Suppress modified-body-touched comments on test files whose diff overlap covers ≤2 lines. Default true — small literal flips in test fixtures rarely warrant reviewer attention."
     required: false
     default: "true"
+  flag-test-gaps:
+    description: "Annotate modified-body comments whose symbol has zero test seams in the index — a modified callable no test exercises. Default false — opt-in, since on a low-coverage repo every untested change would annotate. Requires a mallard binary that supports --flag-test-gaps (first stable release after v0.1.2, or set mallard-rev to 'main')."
+    required: false
+    default: "false"
 
 outputs:
   review-markdown-path:
@@ -151,6 +155,7 @@ runs:
         MAX_COMMENTS: ${{ inputs.max-comments }}
         FILES: ${{ steps.files.outputs.files }}
         IGNORE_TEST_TRIVIA: ${{ inputs.ignore-test-trivia }}
+        FLAG_TEST_GAPS: ${{ inputs.flag-test-gaps }}
       run: |
         if [ -z "$FILES" ]; then
           echo "No changed files between base and head — skipping review."
@@ -162,6 +167,10 @@ runs:
         if [ "$IGNORE_TEST_TRIVIA" = "true" ]; then
           TRIVIA_ARG="--ignore-test-trivia"
         fi
+        GAP_ARG=""
+        if [ "$FLAG_TEST_GAPS" = "true" ]; then
+          GAP_ARG="--flag-test-gaps"
+        fi
         mallard pr-review \
           --base-db .mallard/base.duckdb \
           --head-db .mallard/head.duckdb \
@@ -169,6 +178,7 @@ runs:
           --diff-hunks .mallard/diff-hunks.json \
           --max-comments "$MAX_COMMENTS" \
           $TRIVIA_ARG \
+          $GAP_ARG \
           --format json > .mallard/review.json
         mallard pr-review \
           --base-db .mallard/base.duckdb \
@@ -177,6 +187,7 @@ runs:
           --diff-hunks .mallard/diff-hunks.json \
           --max-comments "$MAX_COMMENTS" \
           $TRIVIA_ARG \
+          $GAP_ARG \
           --format markdown > .mallard/review.md
         EMITTED=$(jq -r '.summary.comments_emitted // 0' .mallard/review.json)
         echo "markdown-path=$(pwd)/.mallard/review.md" >> "$GITHUB_OUTPUT"
