@@ -115,6 +115,8 @@ Different products, different jobs. This table covers a narrow axis: determinist
 
 What competitors do better than mallard: LLM-narrated prose reviews (CodeRabbit, Greptile), per-language semantic accuracy (LSP-backed Serena, Sourcegraph SCIP), and breadth of language coverage. Mallard is the deterministic, citation-grounded structural-diff layer — not a replacement for any of those.
 
+**Comprehension vs verification.** A separate class of tool — live code-graph indexes (e.g. [codegraph](https://github.com/colbymchenry/codegraph)), LSP servers, embedding search — answers *"how does this code work right now"* from a single live snapshot, to make an agent's reading cheaper. Mallard answers a different question: *"what changed between two SHAs, and what did it break."* A single-state index structurally can't compute a base→head delta; an ephemeral per-SHA index is built for exactly that. They **compose** — comprehension for authoring, mallard for verification. See [ADR-0014](docs/decisions/0014-verification-layer-vs-comprehension-layer.md).
+
 ## Pilot evidence
 
 On a hand-graded 10-PR pilot ([`docs/research/wedge-dogfood-1.md`](docs/research/wedge-dogfood-1.md)), mallard's deterministic-only output scored 82% useful, 0% wrong, 100% cited.
