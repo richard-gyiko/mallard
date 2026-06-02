@@ -208,19 +208,11 @@ pub fn run(req: PrReviewRequest) -> Result<PrReviewResult> {
             path,
             hunks,
             req.ignore_test_trivia,
+            req.flag_test_gaps,
             &mut pending,
             &mut summary,
         )?;
     }
-
-    // Stage 5b — test-gap. For every modified callable that carries
-    // inbound test seams in the head index, check whether the PR touched
-    // any of those seams. None touched → emit a `test-gap` comment. This
-    // is the README headline signal ("Modified X — no test changes
-    // detected") and the one `test_gap`-category finding reachable
-    // deterministically. Runs before suppression so test-gap comments
-    // participate in the container / budget passes. Tier `inferred`.
-    emit_test_gaps(&head, &req, &mut pending)?;
 
     // Pattern A — container restate suppression. A comment on a
     // container kind (class / struct / interface / type alias / module)
@@ -464,6 +456,7 @@ fn review_file(
     path: &str,
     diff_hunks: &[DiffRange],
     ignore_test_trivia: bool,
+    flag_test_gaps: bool,
     out: &mut Vec<PendingComment>,
     summary: &mut PrReviewSummary,
 ) -> Result<()> {
@@ -561,13 +554,25 @@ fn review_file(
 
         if !added_callees.is_empty() || !removed_callees.is_empty() {
             summary.symbols_modified_body += 1;
-            let body =
+            let mut body =
                 render_modified_body_comment(&sym.qualified_name, &added_callees, &removed_callees);
             let tier = if head_calls.iter().all(|c| !c.starts_with('[')) {
                 "extracted"
             } else {
                 "inferred"
             };
+            // Stage 5b — test-gap (opt-in). A modified callable that no
+            // test in the index exercises ships a behavior change without
+            // coverage. Append a note to this comment rather than emit a
+            // second one. Zero-seam only: "has tests but none touched" is
+            // a semantic staleness call, out of the deterministic layer.
+            if flag_test_gaps
+                && is_callable_kind(sym.kind)
+                && !is_test_symbol(&sym.path, Some(&sym.qualified_name))
+                && collect_test_seams(head, &sym.id)?.is_empty()
+            {
+                body.push_str(&test_gap_addendum(&sym.qualified_name));
+            }
             out.push(PendingComment {
                 comment: ReviewComment {
                     file: sym.path.clone(),
@@ -733,55 +738,6 @@ fn test_gap_addendum(qualified_name: &str) -> String {
         "\n\n⚠️ **Test gap:** no test in the index exercises `{qualified_name}` — \
         this behavior change ships without coverage.",
     )
-}
-
-/// Stage 5b — test-gap annotation. Opt-in (`flag_test_gaps`). For each
-/// `modified-body` comment (outbound call set changed → hardest evidence
-/// the behavior moved) on a non-test callable, resolve its head-index
-/// test seams. Zero seams → the symbol is modified yet no test anywhere
-/// exercises it: append a note to the existing comment rather than emit a
-/// second one (one comment per symbol, no line-doubling).
-///
-/// Deliberately narrow. The "has tests but none were touched this PR"
-/// variant is NOT emitted: a green untouched test is the normal state of
-/// a correct PR, and deterministically we can't tell "test now stale"
-/// from "test still valid" — that's a semantic call, LLM territory. Zero
-/// coverage of a changed symbol is a structural fact mallard can stand
-/// behind.
-fn emit_test_gaps(
-    head: &IndexReader,
-    req: &PrReviewRequest,
-    pending: &mut [PendingComment],
-) -> Result<()> {
-    if !req.flag_test_gaps {
-        return Ok(());
-    }
-    for pc in pending.iter_mut() {
-        // modified-body only — exclude -logic / -touched (weaker signals).
-        if pc.comment.source_kind != "modified-body" {
-            continue;
-        }
-        let Some(kind) = pc.symbol_kind else { continue };
-        if !is_callable_kind(kind) {
-            continue;
-        }
-        let Some(qname) = pc.comment.symbol_qualified_name.clone() else {
-            continue;
-        };
-        // Never flag a test for lacking tests.
-        if is_test_symbol(&pc.comment.file, Some(&qname)) {
-            continue;
-        }
-        let Some(id_str) = pc.comment.symbol_id.as_ref() else {
-            continue;
-        };
-        let seams = collect_test_seams(head, &SymbolId(id_str.clone()))?;
-        if !seams.is_empty() {
-            continue; // covered — no gap
-        }
-        pc.comment.body.push_str(&test_gap_addendum(&qname));
-    }
-    Ok(())
 }
 
 fn render_modified_body_comment(
