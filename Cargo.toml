@@ -1,6 +1,6 @@
 [package]
 name = "mallard"
-version = "0.1.0"
+version = "0.1.3"
 edition = "2024"
 description = "Deterministic, citation-grounded structural code-index for verifying AI-generated code changes. Per-SHA DuckDB graph. No LLM."
 license = "MIT"

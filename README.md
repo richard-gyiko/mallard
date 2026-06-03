@@ -86,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: richard-gyiko/mallard/.github/actions/review@v0.1.2
+      - uses: richard-gyiko/mallard/.github/actions/review@v0.1.3
         with:
           max-comments: 10
 ```

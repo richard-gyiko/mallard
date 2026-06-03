@@ -4,6 +4,18 @@ All notable changes to mallard are documented here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-06-03
+
+### Added
+
+- **Caller-drop / dead-import findings** in `pr-review` (Stage 6). A symbol removed or renamed in the PR whose call sites or imports were not updated now surfaces as a `caller-drop` (still called) or `dead-import` (still imported) finding at tier `structural-rule`, rendered in a "⚠️ Structural breakage" section. This is the marquee cross-SHA signal a live single-state index cannot compute (the Kiro "updated the definition, missed the call sites" failure mode). Reuses `symbol_diff` + `unresolved_callers`; clean renames produce nothing, a rename that misses sites fires.
+- **Test-gap detection** (`--flag-test-gaps`, opt-in; also a GitHub Action input). Annotates a `modified-body` comment whose symbol has zero test seams in the index — a modified callable no test exercises. Zero-seam only (no staleness guessing); off by default to stay low-noise on low-coverage repos.
+
+### Changed
+
+- GitHub Action default `mallard-rev` bumped `v0.1.2` → `v0.1.3`.
+- Positioning locked as the **cross-SHA verification layer** vs comprehension tools (codegraph / LSP / embeddings) — see [ADR-0014](docs/decisions/0014-verification-layer-vs-comprehension-layer.md). `docs/system.md`, `skills/mallard/SKILL.md`, and the README "How mallard compares" section updated; the stale "No MCP wrapper" note in `docs/plans/workflow-fit-and-contract.md` superseded.
+
 ## [0.1.2] — 2026-05-26
 
 ### Fixed
