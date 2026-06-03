@@ -30,7 +30,7 @@ inputs:
   mallard-rev:
     description: "Git revision of mallard to build from. Defaults to the latest stable tag. Override with 'main' to track unreleased changes (no stability guarantee)."
     required: false
-    default: "v0.1.2"
+    default: "v0.1.3"
   post-comment:
     description: "Post the rendered review as a PR comment. Set to 'false' to dry-run."
     required: false
@@ -40,7 +40,7 @@ inputs:
     required: false
     default: "true"
   flag-test-gaps:
-    description: "Annotate modified-body comments whose symbol has zero test seams in the index — a modified callable no test exercises. Default false — opt-in, since on a low-coverage repo every untested change would annotate. Requires a mallard binary that supports --flag-test-gaps (first stable release after v0.1.2, or set mallard-rev to 'main')."
+    description: "Annotate modified-body comments whose symbol has zero test seams in the index — a modified callable no test exercises. Default false — opt-in, since on a low-coverage repo every untested change would annotate."
     required: false
     default: "false"
 
