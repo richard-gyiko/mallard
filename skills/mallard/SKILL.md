@@ -1,7 +1,7 @@
 ---
 name: mallard
 description: >-
-  Verify local agent-authored code changes and scope refactor impact using a deterministic structural code-index — no LLM, no hallucination, every result anchored to a symbol ID + file:line. Catches cross-SHA structural breakage a live/LSP index cannot compute from one snapshot: a removed symbol still called (caller-drop), a removed symbol still imported (dead-import), a modified function no test exercises (test-gap); plus caller/callee graph, blast-radius, test-seam discovery, and symbol diff. Use AFTER editing code to verify what structurally changed and what it broke; BEFORE renaming, removing, or modifying a public symbol to scope blast radius; whenever the user asks "who calls X", "what breaks if I rename Y", "what's the blast radius of Z", "find symbol foo", "what tests exercise X", "what changed between these two SHAs", "verify my local changes", or "did this refactor miss any call sites". Returns citation-grounded answers from a per-SHA DuckDB index. Covers Rust, Python, TypeScript, JavaScript. Not an LSP — answers cross-SHA diff questions LSPs cannot.
+  Use Mallard to verify local code edits and scope refactor impact with a deterministic structural code index. Trigger after editing code; before renaming, removing, or changing public symbols; and when asked who calls a symbol, what tests exercise it, what changed between SHAs, or whether a refactor missed call sites. Mallard returns citation-grounded symbol records from per-SHA DuckDB indexes for Rust, Python, TypeScript, and JavaScript.
 allowed-tools: [Bash, Read]
 ---
 
@@ -21,9 +21,9 @@ Indexing takes ~10s per 100kloc. The `.duckdb` file is reproducible from the SHA
 
 If the user asks any of the questions in the description without an existing index, build one first. Default output: `.mallard/head.duckdb`.
 
-## Four agent-facing commands
+## Stable agent-facing commands
 
-All four emit `schema_version: "1.0"`. Always check it before parsing.
+These four commands emit `schema_version: "1.0"`. Always check it before parsing.
 
 ### 1. `find` — qname lookup
 
@@ -104,7 +104,7 @@ mallard symbol-diff --base-db .mallard/base.duckdb --head-db .mallard/head.duckd
   | jq '.removed[] | "\(.path):\(.anchor.start_line) \(.qualified_name)"'
 ```
 
-Then for each removed symbol, check unresolved callers in HEAD to catch missed updates.
+Then for each removed symbol, check unresolved callers in HEAD to catch missed updates. `unresolved-callers` is part of the power-user surface below, so do not expect a `schema_version` envelope.
 
 ### Untested-change detection (authoring time)
 
@@ -139,7 +139,7 @@ Full schema reference: `docs/cli-json-contract.md` in the mallard repo.
 
 ## Local change verification
 
-For local agent-authored changes, prefer the versioned query commands. The goal is to help the agent verify its own edit before handing work back to the user.
+For local agent-authored changes, prefer the stable agent-facing commands when they fit. Use power-user commands only for gaps such as post-deletion unresolved caller checks. The goal is to help the agent verify its own edit before handing work back to the user.
 
 Recommended workflow:
 
