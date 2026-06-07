@@ -1,6 +1,6 @@
 ---
 name: mallard
-description: Verify what an AI agent changed across two SHAs, and scope refactor impact, using a deterministic structural code-index — no LLM, no hallucination, every result anchored to a symbol ID + file:line. Catches cross-SHA structural breakage a live/LSP index cannot compute from one snapshot: a removed symbol still called (caller-drop), a removed symbol still imported (dead-import), a modified function no test exercises (test-gap); plus caller/callee graph, blast-radius, test-seam discovery, and symbol diff. Use AFTER an AI agent edits code to verify what structurally changed and what it broke; BEFORE renaming, removing, or modifying a public symbol to scope blast radius; whenever the user asks "who calls X", "what breaks if I rename Y", "what's the blast radius of Z", "find symbol foo", "what tests exercise X", "what changed between these two SHAs", "verify this diff/PR", or "did this refactor miss any call sites". Returns citation-grounded answers from a per-SHA DuckDB index. Covers Rust, Python, TypeScript, JavaScript. Not an LSP — answers cross-SHA diff questions LSPs cannot.
+description: Verify local agent-authored code changes and scope refactor impact using a deterministic structural code-index — no LLM, no hallucination, every result anchored to a symbol ID + file:line. Catches cross-SHA structural breakage a live/LSP index cannot compute from one snapshot: a removed symbol still called (caller-drop), a removed symbol still imported (dead-import), a modified function no test exercises (test-gap); plus caller/callee graph, blast-radius, test-seam discovery, and symbol diff. Use AFTER editing code to verify what structurally changed and what it broke; BEFORE renaming, removing, or modifying a public symbol to scope blast radius; whenever the user asks "who calls X", "what breaks if I rename Y", "what's the blast radius of Z", "find symbol foo", "what tests exercise X", "what changed between these two SHAs", "verify my local changes", or "did this refactor miss any call sites". Returns citation-grounded answers from a per-SHA DuckDB index. Covers Rust, Python, TypeScript, JavaScript. Not an LSP — answers cross-SHA diff questions LSPs cannot.
 allowed-tools: [Bash, Read]
 ---
 
@@ -77,7 +77,7 @@ mallard index --sha "$BASE_SHA" --out .mallard/base.duckdb /tmp/base
 git worktree remove /tmp/base
 ```
 
-Returns `{added, removed, modified}`. Symbols match by `(qualified_name, path, signature)`. `modified` = same key, different anchor (body changed). Use to verify what an AI agent actually changed structurally — particularly for agent-authored PRs.
+Returns `{added, removed, modified}`. Symbols match by `(qualified_name, path, signature)`. `modified` = same key, different anchor (body changed). Use to verify what the agent actually changed structurally in the local working tree.
 
 ## Composition patterns
 
@@ -96,7 +96,7 @@ After agent removes a function, check for orphan callers:
 mallard query unresolved-callers --index .mallard/head.duckdb --name deleted_fn
 ```
 
-### Cross-SHA verification (agent PRs)
+### Local cross-SHA verification
 
 ```bash
 mallard symbol-diff --base-db .mallard/base.duckdb --head-db .mallard/head.duckdb \
@@ -115,7 +115,7 @@ mallard query test-seams --index .mallard/head.duckdb --qname process_request \
   || echo "⚠️ process_request has no test seams — modified without coverage"
 ```
 
-This is the same fact the `pr-review --flag-test-gaps` flag automates in CI; at authoring time you call it per changed symbol. Zero-seam is a structural fact. "Has tests but none were touched" is a staleness judgment mallard does NOT make — that's yours (or the LLM's) to decide.
+Zero-seam is a structural fact. "Has tests but none were touched" is a staleness judgment mallard does NOT make — that's yours (or the LLM's) to decide.
 
 ## When to refuse
 
@@ -136,37 +136,46 @@ This is the same fact the `pr-review --flag-test-gaps` flag automates in CI; at 
 
 Full schema reference: `docs/cli-json-contract.md` in the mallard repo.
 
-## PR review (`pr-review`) — unversioned
+## Local change verification
 
-Deterministic structural review of a diff. Powers the GitHub Action; an agent can also run it directly. Needs base + head indexes (build both per the `symbol-diff` checkout/worktree steps above) plus the changed-file list.
+For local agent-authored changes, prefer the versioned query commands. The goal is to help the agent verify its own edit before handing work back to the user.
+
+Recommended workflow:
+
+1. Build a base index before editing, or from the comparison SHA via a worktree.
+2. Make the code change.
+3. Build a head index from the updated working tree.
+4. Run `mallard symbol-diff` to see added / removed / modified symbols.
+5. For removed or renamed symbols, run `mallard query unresolved-callers` against the head index to catch missed call sites.
+6. For modified symbols, run `mallard query test-seams` to identify tests that exercise the changed code.
+7. Report only citation-grounded facts with `path:line` anchors.
+
+Example local flow:
 
 ```bash
-mallard pr-review \
-  --base-db .mallard/base.duckdb \
-  --head-db .mallard/head.duckdb \
-  --files src/auth.rs,src/api.rs \
-  --max-comments 10 \
-  --format markdown
+# Before edits
+mallard index --sha "$(git rev-parse HEAD)" --out .mallard/base.duckdb .
+
+# After edits
+mallard index --sha "working-tree" --out .mallard/head.duckdb .
+
+# What changed structurally?
+mallard symbol-diff --base-db .mallard/base.duckdb --head-db .mallard/head.duckdb
+
+# If a symbol was removed or renamed, check missed callers in HEAD
+mallard query unresolved-callers --index .mallard/head.duckdb --name deleted_fn
+
+# If a symbol was modified, check relevant tests
+mallard query test-seams --index .mallard/head.duckdb --qname process_request
 ```
 
-Emits review comments — added / removed / `modified-body` signals plus structural-rule findings — each tagged with a confidence tier (`structural-rule` > `extracted` > `inferred` > `ambiguous`). Flags:
-
-| flag | effect |
-|---|---|
-| `--files a,b` | comma-separated changed paths, relative to repo root (required) |
-| `--diff-hunks <path>` | JSON from `mallard diff-hunks`; enables `modified-body-touched` line-overlap detection and scopes rule findings to changed lines (cuts noise from pre-existing code) |
-| `--ignore-test-trivia` | drop `modified-body-touched` on test files when the diff overlap is ≤ 2 lines |
-| `--flag-test-gaps` | annotate `modified-body` comments whose symbol has zero test seams. Opt-in: on a low-coverage repo every untested change annotates |
-| `--max-comments N` | comment budget; lowest-tier dropped first (default 10) |
-| `--format json\|markdown` | output (default `json`) |
-
-Does NOT carry `schema_version` — shape may evolve via binary SemVer. Prefer the versioned query commands when you only need raw structural facts.
+Use this local workflow when the user asks to verify an edit, check whether a refactor missed call sites, or understand the structural impact of changes.
 
 ## Power-user surface (unversioned)
 
 These commands exist but DON'T carry `schema_version`. Use only when the 4 versioned commands above don't fit:
 
-`query symbol`, `query neighbors`, `query expand`, `query findings`, `query symbols-in-file`, `query edges-by-file`, `query unresolved-callers`, `query importers-of`, `query files`, `query metadata`, `diff-hunks` (the JSON feeder for `pr-review --diff-hunks`).
+`query symbol`, `query neighbors`, `query expand`, `query findings`, `query symbols-in-file`, `query edges-by-file`, `query unresolved-callers`, `query importers-of`, `query files`, `query metadata`, `diff-hunks`.
 
 Their shapes are documented in `docs/cli-json-contract.md` but may evolve via SemVer of the binary.
 
